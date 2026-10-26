@@ -1,0 +1,37 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 数据（体积大，绝不要进仓库）----
+data/
+*.tif
+*.tiff
+*.svs
+*.npy
+*.npz
+
+# ---- 训练产物 ----
+checkpoints/
+checkpoints3/
+logs/
+logs3/
+outputs/
+runs/
+*.pt
+*.pth
+*.log
+nohup.out
+
+# ---- 旧方案存档（只保留在本地）----
+_deprecated/
+
+# ---- 临时可视化 ----
+mask_visual_check.png
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
