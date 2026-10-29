@@ -35,8 +35,10 @@ nohup.out
 # ---- 本地权重目录（271 MB，走 GitHub Release 分发，不进仓库）----
 weights/
 
-# ---- 临时可视化 ----
+# ---- 临时可视化 / 验证 ----
 mask_visual_check.png
+_smoke/
+_verify/
 
 # ---- 编辑器 / 系统 ----
 .idea/

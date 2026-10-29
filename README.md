@@ -1,4 +1,4 @@
-# ToxPath —— 基于 HistoPLUS 架构的 WSI 肿瘤三分类语义分割
+# ToxPath —— 基于 HistoPLUS 架构的肿瘤三分类分割（模型 + 训练）
 
 把 Owkin 的 **HistoPLUS**（细胞实例分割）改造成**区域级三分类语义分割**：
 
@@ -10,254 +10,128 @@
       2 = 前景占比 ≥ 5%（较多肿瘤）
 ```
 
-编码器（H0-mini ViT-B/14）与四路 Neck 完全沿用 HistoPLUS，只把原来的
-np/hv/tp 三个解码头换成一个 3 类语义头；总参数 114.1 M。
+编码器（H0-mini ViT-B/14）与四路 Neck 沿用 HistoPLUS，只把原来的 np/hv/tp
+三个解码头换成一个 3 类语义头：encoder 85.7 M + neck 14.3 M + decoder 14.0 M
+= **114.1 M** 参数。
 
-## 快速开始（实验室 RTX 4090）
+> 项目当前**只保留模型定义与训练代码**。推理、评测、比赛提交、打包脚本已从工作区
+> 移除（仍完整保存在 git 历史里），需要时见文末「恢复旧文件」。
 
-代码走 Git，权重走 GitHub Release（271 MB 超过单文件 100 MB 限制，进不了仓库）。
+## 目录结构
 
-```powershell
-# 0) 实验室机器：拉代码（第一次）+ 下权重
-git clone git@github.com:shanshicoder/toxpath.git D:\work\toxpath
-cd D:\work\toxpath
-scripts\fetch_weights.bat                    # 271 MB → weights\，自动校验 SHA256
-
-# 1) 建环境（一次）
-conda create -n toxpath python=3.10 -y
-conda activate toxpath
-pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
-pip install timm==1.0.8 numpy Pillow
-
-# 2) 体检：GPU / torch / timm / 数据 / 权重 / 磁盘
-python scripts\check_env.py --data-root "D:\data\toxpath"
-
-# 3) 冒烟 5 分钟 → 单折 → 5 折
-.\scripts\train_local.bat -Mode smoke
-.\scripts\train_local.bat -Mode fold -Fold 1 -Epochs 20
-.\scripts\train_local.bat -Mode all -Epochs 20
+```
+toxpath/
+├── model/                    # 模型定义（唯一需要读的模型代码）
+│   ├── config.py             #   ToxPathConfig：尺寸/类别数/初始化策略
+│   ├── encoder.py            #   H0-mini ViT-B/14（timm 构造，支持 out_indices 四层特征）
+│   ├── neck.py               #   HistoPLUS 四路 Neck（多尺度特征聚合）
+│   ├── decoder.py            #   3 类语义解码头
+│   ├── blocks.py             #   FinalConv 等基础块
+│   ├── losses.py             #   DiceCrossEntropyLoss（CE + soft Dice）
+│   └── toxpath.py            #   ToxPathSegmentor：encoder → neck → decoder
+├── dataset/
+│   └── toxpath3_dataset.py   # 读 patch + 三分类掩膜，按类别加权采样
+├── train_3class.py           # 训练入口（单折 / 多折 / 续训）
+├── splits.py                 # 按切片做蛇形分折（切片数自适应）
+├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
+├── scripts/
+│   └── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
+├── requirements.txt
+└── data/toxpath/             # 数据（不进仓库）
 ```
 
-之后每次改完代码，笔记本上 `scripts\sync_github.bat`，实验室机器 `git pull` 即可。
-细节（首次配 SSH key、权重下载失败重试、电源设置、远程桌面断开、续训、评测、故障排查）
-见 `docs/本地训练SOP.md`。
+`scripts/make_3class_masks.py` 是唯一保留的脚本：`dataset` 与 `splits` 的报错信息
+都指向它，删掉后换数据就没法重新生成三分类标签。其余脚本已移除。
 
 ## 环境
 
-代码要跑在两台机器上：笔记本（CPU，只做形状冒烟）和实验室工作站（RTX 4090 24 GB，正式训练）。
-**数据根与权重路径不写死**，统一由 `paths.py` 按「命令行 > 环境变量 > 项目内相对路径 > 历史绝对路径」解析，
-换机器不用改代码。
+`timm` **必须锁 1.0.8**，换版本会改变 ViT block 实现或 `out_indices` 语义。
 
 ```powershell
-# 实验室机器（Windows + 4090）
 conda create -n toxpath python=3.10 -y
 conda activate toxpath
-pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision   # 4090
 pip install timm==1.0.8 numpy Pillow
-
-# 一条命令体检（GPU / torch / timm / 数据 / 权重 / 磁盘）
-python scripts\check_env.py --data-root "D:\data\toxpath"
 ```
 
-完整的本地训练流程见 **[docs/本地训练SOP.md](docs/本地训练SOP.md)**（环境搭建、电源设置、冒烟、5 折、续训、评测、故障排查）。
-
+CPU 机器（只验形状）把第一行换成 `.../whl/cpu`。
 
 ## 数据
 
-> 下面是**本地子集**（5 个切片，笔记本放得下）。实验室机器上是全量 **73 个 WSI**，
-> 目录结构完全相同。代码不假设切片数：训练时扫描 `train_patches/` 下所有目录，
-> 折划分按切片数自动分层（`splits.py`），换数据集不用改代码。
-> 具体步骤见 `docs/本地训练SOP.md` 第 1.7 节。
-
 ```
 data/toxpath/
-├── train_images/      5 张金字塔 TIFF（L0 8.6万~10万 px）
-├── train_labels/      5 个 GeoJSON（QuPath 导出的 Lymphoma / Region* / Other）
-├── train_patches/     4953 张 1024×1024 H&E JPEG
-├── train_masks/       4953 张二值 mask（0/255）        ← 原始标注
-├── train_masks_classes/ 4953 张彩色三分类 mask（黑/绿/红） ← 训练读取
-└── _patch_labels_3class.csv  patch 类别与前景占比索引
+├── train_patches/{slide}/1.0/{X}_{Y}.jpeg        # 1024×1024 patch
+├── train_masks_classes/{slide}/1.0/{X}_{Y}.png   # 三分类彩色掩膜（黑/绿/红）
+└── _patch_labels_3class.csv                      # slide,name,n_fg_px,fg_ratio,label
 ```
 
-类别分布（实测）：
+路径不写死，`paths.py` 按 **命令行 `--data-root` > 环境变量 `TOXPATH_DATA_ROOT` >
+`<项目>/data/toxpath` > 同级目录 > 历史绝对路径** 的顺序找，找不到会列出所有候选。
+权重同理：`--histoplus-ckpt` > `TOXPATH_HISTOPLUS_CKPT` > `<项目>/weights/`。
 
-| 类别 | 数量 | 占比 |
-|---|---:|---:|
-| 0 背景 | 4139 | 83.6% |
-| 1 少量（0.01–5%） | 172 | 3.5% |
-| 2 较多（≥5%） | 642 | 13.0% |
+三分类标签由二值 mask 派生（类别按整张 patch 的前景占比划分：<0.01% 记背景，
+0.01%~5% 记 1，≥5% 记 2）：
 
-生成三分类 mask（已执行，改阈值后可重跑）：
-
-```bash
-python scripts/make_3class_masks.py --dry-run   # 先看分布
-python scripts/make_3class_masks.py             # 写 train_masks_classes/
+```powershell
+python scripts/make_3class_masks.py --dry-run   # 只统计分布，不写文件
+python scripts/make_3class_masks.py             # 生成 train_masks_classes/ 与 CSV
 ```
 
 ## 训练
 
-一键脚本（推荐，后台运行 + 日志重定向，远程桌面断开不影响）：
-
 ```powershell
-.\scripts\train_local.bat -Mode smoke                 # 冒烟：1 epoch / 32 样本，约 5 分钟
-.\scripts\train_local.bat -Mode fold -Fold 1 -Epochs 20   # 单折
-.\scripts\train_local.bat -Mode all -Epochs 20            # 全部折（5 个切片时约 8~10 小时）
-.\scripts\train_local.bat -Mode resume -Fold 1            # 从 last.pt 续训
-.\scripts\train_local.bat -Mode all -DryRun               # 只打印命令，不启动
+# 冒烟：1 epoch、8 个样本、224 输入，确认数据与显存（CPU 也能跑，约 1 分钟）
+python train_3class.py --fold 1 --epochs 1 --image-size 224 `
+  --max-train-samples 8 --max-val-samples 4 --samples-per-epoch 8 `
+  --num-workers 0 --device cpu --init none `
+  --out-dir _smoke/ckpt --log-dir _smoke/log
+
+# 单折（先跑 1 折看曲线）
+python train_3class.py --fold 1 --epochs 12
+
+# 五折（按切片蛇形分折，结果写 checkpoints3/splits.json）
+python train_3class.py --all-folds --epochs 12
+
+# 续训（从 last.pt 接着跑）
+python train_3class.py --fold 1 --epochs 24 --resume checkpoints3/fold1/last.pt
 ```
 
-折数由切片数决定（默认 5 折，切片不足时自动降低），可用 `--num-folds` 覆盖。
-每折训练时会把划分写到 `checkpoints3/splits.json`，评测直接复用，保证两边验的是同一批切片。
+主要默认值（都可用命令行覆盖）：
 
-> 换全量 73 个 WSI 后，`--samples-per-epoch` 要从 800 调到 3500 左右，
-> 否则每轮只看 1% 的数据。详见 SOP 1.7。
-
-直接调 Python（等价写法）：
-
-```bash
-# 单折（1024 输入，4090）
-python train_3class.py --fold 1 --epochs 20 --batch-size 1 --grad-accum 8 \
-    --samples-per-epoch 800 --val-every 2 --amp --grad-checkpointing
-
-# 全 5 折（按切片留一）
-python train_3class.py --all-folds --epochs 20 --batch-size 1 --grad-accum 8 --amp
-
-# 本地 CPU 冒烟
-python train_3class.py --fold 1 --epochs 1 --image-size 224 --max-train-samples 4 \
-    --max-val-samples 2 --device cpu --no-amp --num-workers 0
-```
-
-产物：`checkpoints3/foldN/{best.pt,last.pt,history.json}`、
-`logs3/foldN/train_log.json`、`checkpoints3/summary.json`。
-实际单次运行日志在 `logs3/_runs/<模式>_<时间戳>.log`。
-
-预训练权重按以下顺序查找（不再写死 E 盘）：
-
-1. `--histoplus-ckpt`
-2. 环境变量 `TOXPATH_HISTOPLUS_CKPT`
-3. `<项目根>/weights/histoplus_cellvit_segmentor_20x.pt` ← 推荐
-4. `<项目根>/histoplus_cellvit_segmentor_20x.pt`
-5. `<项目根>/../histoplus_cellvit_segmentor_20x.pt`
-6. `E:/project/histoplus_cellvit_segmentor_20x.pt`（笔记本旧位置）
-
-> 权重不进 Git（271 MB > 100 MB 单文件限制），由 `scripts/fetch_weights.bat`
-> 从 GitHub Release 下到 `<项目根>/weights/`，第 3 条直接命中，不用配环境变量。
-
-| `--init` | 加载内容 |
-|---|---|
-| `encoder` | 仅 H0-mini（173 个张量） |
-| `encoder+neck` | 编码器 + 四路 Neck（68 个张量，默认） |
-| `full` | 再加 np 解码头（71/73，最后一层 1×1 因 3 类而跳过） |
-
-## 评测与推理（训练完成后）
-
-```powershell
-# 单折评测
-python evaluate.py --fold 1 --ckpt checkpoints3\fold1\best.pt
-
-# 全 5 折 + 汇总（mean ± std → eval3\summary.csv）
-python evaluate.py --all-folds --ckpt-dir checkpoints3
-
-# 单张切片推理出彩色预测图 / 三联对比图
-python inference.py --ckpt checkpoints3\fold1\best.pt --slide train_001 `
-    --out-dir runs3\pred_fold1 --save-pred --overlay-every 20
-
-# 本地 CPU 冒烟（随机权重 + 224 输入）
-python evaluate.py --fold 1 --ckpt <任意.pt> --image-size 224 `
-    --max-samples 8 --device cpu --overlay-every 2
-```
-
-三层指标（`eval3/foldN/metrics.json` + `per_patch.csv` + `summary.csv`）：
-
-| 口径 | 指标 | 用途 |
+| 参数 | 默认 | 说明 |
 |---|---|---|
-| `full_*` 整图 | 每类 Dice/IoU + 像素精度 | 与训练日志同口径 |
-| `tissue_*` 组织区域内 | 同上（Otsu 剔除白色空背景） | **主指标**，写报告用 |
-| `patch_acc` | 预测前景占比按 0.01%/5% 分箱 vs 真值 | 「少量 vs 较多」分级准确率 |
+| `--image-size` | 1024 | 1024 输入下 `--batch-size` 通常只能 1~2 |
+| `--grad-accum` | 8 | 等效 batch = batch_size × grad_accum |
+| `--samples-per-epoch` | 800 | 按类别权重采样，不是全量遍历 |
+| `--lr` / `--encoder-lr-mult` | 3e-4 / 0.1 | 编码器用 1/10 学习率 |
+| `--class-weights` | 0.20 0.50 0.30 | 背景 / 少量 / 较多 |
+| `--init` | encoder+neck | 可选 `none`/`encoder`/`encoder+neck`/`full` |
+| `--freeze-encoder` | 关 | 显存吃紧时开 |
+| `--amp` | 开 | CUDA 上 bfloat16 |
 
-## 比赛提交（ToxPath AI Challenge 2026）
+产物：
 
-官方口径和上面那三层**不是一回事**，提交前必须用 `eval_binary.py` 打分：
+```
+checkpoints3/
+├── splits.json            # 折划分（切片名 → fold），复现与对账用
+├── fold1/best.pt          # dice_fg 最好的那个 epoch
+├── fold1/last.pt          # 续训用
+└── summary.json           # 多折汇总（全折模式）
+logs3/fold1.jsonl          # 逐 epoch 的 loss / dice / acc
+```
 
-- 逐 patch 算**二值** Dice / IoU，单张得分 = `(Dice + IoU) / 2`；
-- 真值与预测**都全空**的 patch 记 **1.0**（本地 83.5% 的 patch 属于这类，
-  所以「全预测为空」的综合分就有 **≈0.835**）；
-- 最终分是**所有 patch 的等权平均**，slide 级只作参考。
+## 恢复旧文件
+
+被裁掉的推理 / 评测 / 提交链路在 git 历史里（提交 `2ed284a` 及之前），按需取回：
 
 ```powershell
-# 1) 官方口径打分 + 后处理参数扫描
-python eval_binary.py --fold 1 --ckpt checkpoints3\fold1\best.pt `
-    --sweep-min-area 0,64,128,256 --sweep-threshold 0.4,0.5,0.6
+# 看当时有哪些文件
+git ls-tree -r --name-only 2ed284a
 
-# 2) 生成提交（5 折集成 + TTA）
-python predict_test.py --test-root D:\data\toxpath_test `
-    --ckpt-dir checkpoints3 --tta --min-area 128 `
-    --out-dir submission --zip submission.zip
-
-# 3) 上传前自检（缺文件/尺寸/像素值/zip 层级都会查，有错退出码 1）
-python scripts\check_submission.py --test-root D:\data\toxpath_test `
-    --submission submission --zip submission.zip
+# 取回单个文件或整个目录
+git checkout 2ed284a -- predict_test.py
+git checkout 2ed284a -- scripts docs tests
 ```
 
-提交物结构（**只把 `.jpeg` 换成 `.png`，中间 `1.0/` 要去掉**）：
-
-```
-submission/test_001/0_0.png        ← 单通道 L、8-bit、值只有 0/255、尺寸同原图
-submission/test_001/1024_0.png
-submission.zip                     ← 根目录直接是 test_001/...，不套外层文件夹
-```
-
-**不要**从 `test_images/*.tif` 重新切图：官方 patch 文件名编码了原图坐标，
-自己切的坐标系不同，会和真值对不上。
-
-## 目录
-
-```
-toxpath/
-├── weights/                  # HistoPLUS 权重 271 MB（gitignore，随 -IncludeWeights 包分发）
-├── model/
-│   ├── config.py     # ToxPathConfig（num_classes/in_channels/patch_size/...）
-│   ├── blocks.py     # ConvNormAct / DeconvNormAct / SwiGLUFFNFused
-│   ├── encoder.py    # H0-mini → 4 层 [B,768,H/14,W/14]
-│   ├── neck.py       # HistoPLUS 四路 Neck（64/128/256/512）
-│   ├── decoder.py    # 单头语义解码器（3 类）
-│   ├── toxpath.py    # 组装 + forward（含 1024→1036 的 pad/crop）
-│   └── losses.py     # CE + soft Dice
-├── dataset/
-│   └── toxpath3_dataset.py   # 1024 输入、彩色三分类 mask、采样权重
-├── scripts/
-│   ├── check_env.py          # 环境体检：GPU/torch/timm/数据/权重/磁盘 + 参数推荐
-│   ├── train_local.ps1       # Windows 一键训练（smoke/fold/all/resume，后台运行）
-│   ├── train_local.bat       # 上面脚本的启动器（绕过 .ps1 执行策略限制，推荐用这个）
-│   ├── sync_github.ps1       # 提交并推送到 GitHub（含大文件护栏）
-│   ├── sync_github.bat       # 上面脚本的启动器
-│   ├── fetch_weights.ps1     # 从 GitHub Release 下载 271 MB 权重 + SHA256 校验
-│   ├── fetch_weights.bat     # 上面脚本的启动器
-│   ├── make_code_package.ps1 # 离线备用：打包代码（/带权重）走 U 盘
-│   ├── make_code_package.bat # 上面脚本的启动器
-│   └── make_3class_masks.py  # 二值 mask → 彩色三分类 mask
-├── tests/
-│   ├── test_dataset.py       # Dataset 35 项测试
-│   ├── test_model_forward.py # 模型形状/反传/冻结/权重往返 8 项测试
-│   └── test_submission.py    # 提交链路 22 项（指标/后处理/PNG/zip/自检，不需要 torch）
-├── docs/
-│   └── 本地训练SOP.md        # Windows + 4090 全流程（电源设置、续训、故障排查）
-├── paths.py                  # 数据根/权重统一解析（命令行>环境变量>项目内>历史）
-├── splits.py                 # 切片发现 + 按肿瘤负荷分层分折（自适应切片数）
-├── inference.py              # 推理：彩色预测图 / 三联对比图 / Otsu 组织掩膜
-├── evaluate.py               # 诊断评测：整图 + 组织区域 + patch 分级，5 折汇总
-├── eval_binary.py            # 官方口径打分：逐 patch Dice/IoU，阈值×最小面积扫描
-├── predict_test.py           # 生成提交：test_patches → {slide}/{name}.png + zip
-└── train_3class.py           # 5 折训练脚本（AMP + 梯度累积）
-```
-
-## 必须记住的约束
-
-1. **1024 不是 14 的倍数**：`ToxPathSegmentor.forward` 会 reflect-pad 到
-   1036（14×74）再裁回 1024；Dataset 不需要自己 pad。
-2. **归一化用 Bioptimus 统计量**：`mean=(0.707223,0.578729,0.703617)`，
-   `std=(0.211883,0.230117,0.177517)`，不要用 ImageNet。
-3. **类别是 patch 级的**：同一张 patch 的前景只有一种颜色，类别由整图前景
-   占比决定；模型实际学的是「前景分割 + 整图肿瘤负荷分级」。
-4. **不要换 `SwiGLUFFNFused`**：参数名（`w12/w3`）与门控顺序都与 timm 不同。
-
+`2ed284a` 里的 `docs/本地训练SOP.md` 是完整 SOP（环境、权重下载、断电续训、
+比赛提交规范与实测数据），需要时取回即可。

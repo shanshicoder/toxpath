@@ -98,8 +98,9 @@ DEFAULT_CLASS_WEIGHTS: tuple[float, float, float] = (0.20, 0.50, 0.30)
 """CE 类别权重 (背景, 少量肿瘤, 较多肿瘤)。
 
 当前值是按 5 个切片（4953 patch，类别 1 占 3.5%）调的。换成 73 个 WSI 后
-类别分布必然变化，跑 ``scripts/check_env.py`` 或 ``make_3class_masks.py --dry-run``
-看到新分布后，按 ``背景:少量:较多 ≈ (1/占比) 归一化`` 重新估一遍再改。
+类别分布必然变化，跑 ``python scripts/make_3class_masks.py --dry-run``
+（只统计不写文件）看到新分布后，按 ``背景:少量:较多 ≈ (1/占比) 归一化``
+重新估一遍再改。
 """
 
 
