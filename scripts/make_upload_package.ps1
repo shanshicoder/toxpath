@@ -160,7 +160,13 @@ $sumLines = foreach ($p in $packages) {
     $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
     "$h  $(Split-Path -Path $p -Leaf)"
 }
-Set-Content -LiteralPath (Join-Path $OutDir "SHA256SUMS") -Value $sumLines -Encoding ascii
+# LF line endings are mandatory here: GNU sha256sum on Linux would otherwise treat
+# the trailing CR as part of the file name and fail with "No such file or directory".
+$sumPath = Join-Path $OutDir "SHA256SUMS"
+[System.IO.File]::WriteAllText($sumPath, (($sumLines -join "`n") + "`n"), (New-Object System.Text.ASCIIEncoding))
+if ([System.IO.File]::ReadAllText($sumPath).Contains("`r")) {
+    throw "SHA256SUMS contains CR; Linux sha256sum -c would fail. Script bug, do not upload."
+}
 foreach ($l in $sumLines) { Write-Host "   $l" }
 
 $manifest = @()
@@ -189,7 +195,8 @@ $manifest += "Check counts on the server:"
 $manifest += "  find train_patches -type f | wc -l"
 $manifest += "  find train_masks_classes -type f | wc -l"
 $manifest += "  wc -l _patch_labels_3class.csv"
-Set-Content -LiteralPath (Join-Path $OutDir "CHECKSUMS.txt") -Value $manifest -Encoding ascii
+# LF as well, so `cat CHECKSUMS.txt` on the server does not show stray ^M.
+[System.IO.File]::WriteAllText((Join-Path $OutDir "CHECKSUMS.txt"), (($manifest -join "`n") + "`n"), (New-Object System.Text.ASCIIEncoding))
 
 # ---------- next step ----------
 

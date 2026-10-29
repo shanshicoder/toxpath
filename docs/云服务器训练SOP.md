@@ -75,17 +75,20 @@ powershell -ExecutionPolicy Bypass -File scripts\make_upload_package.ps1
 
 | 文件 | 大小 | 条目 | 内容 |
 |---|---:|---:|---|
-| `toxpath_code.tar.gz` | 98,976 B（96.6 KB） | 30（26 文件 + 4 目录） | `git archive HEAD`，归档根就是仓库根 |
+| `toxpath_code.tar.gz` | 约 100 KB | 约 30 | `git archive HEAD`，归档根就是仓库根 |
 | `toxpath_data.tar` | 1,306,798,592 B（1.22 GiB） | 9,929（9,907 文件 + 22 目录） | `train_patches/` + `train_masks_classes/` + CSV |
-| `SHA256SUMS` | 171 B | — | 服务器上 `sha256sum -c` 直接校验 |
-| `CHECKSUMS.txt` | 658 B | — | 人读清单：commit、大小、文件数、解压命令 |
+| `SHA256SUMS` | 约 200 B | — | 服务器上 `sha256sum -c` 直接校验（**LF 行尾**） |
+| `CHECKSUMS.txt` | 约 700 B | — | 人读清单：commit、大小、文件数、解压命令 |
 
-脚本内置四项检查，**任何一项不过就中止并报红，不会产出可上传的包**：
+> 代码包大小随 commit 变化（当前约 100 KB），精确值以脚本输出和 `CHECKSUMS.txt` 为准；数据包大小只在换数据时变。
+
+脚本内置五项检查，**任何一项不过就中止并报红，不会产出可上传的包**：
 
 1. `patches in tar` = `masks in tar` = 磁盘上的文件数（本次 4953 / 4953 / 4953）
 2. `CSV 行数` = patch 数 + 1（本次 4954，含表头）
 3. 归档内路径为正斜杠（Windows 自带 `tar.exe` 是 bsdtar，已实测不会写出反斜杠文件名）
-4. 生成 SHA256 并写入 `SHA256SUMS`
+4. `SHA256SUMS` 必须是 LF 行尾 —— PowerShell 的 `Set-Content` 默认写 CRLF，GNU `sha256sum` 会把 `\r` 当成文件名的一部分，于是报 `No such file or directory`。这个坑真踩过，所以写进脚本自检
+5. 生成 SHA256 并写入 `SHA256SUMS`
 
 | 参数 | 用途 |
 |---|---|
