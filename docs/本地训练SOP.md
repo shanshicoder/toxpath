@@ -607,7 +607,104 @@ python inference.py --ckpt checkpoints3\fold1\best.pt --slide train_001 `
 
 ---
 
-## 8. 结果归档
+## 8. 比赛提交（ToxPath AI Challenge 2026）
+
+官方口径和上面第 7 节的三层指标**不是同一个算法**，必须单独打分。
+
+官方规则要点（照原文摘）：
+
+- 逐 patch 算**二值** Dice / IoU，单张得分 = `(Dice + IoU) / 2`；
+- 真值与预测**都全空**的 patch，Dice / IoU 都记 **1.0**；
+- 最终分 = **所有 patch 的等权平均**（slide 级只作参考）；
+- 真值 = GeoJSON 里 `classification.name == "Lymphoma"` 的轮廓栅格化；
+- **每队只有一次正式提交机会**，且必须覆盖完整测试集；
+- 缺文件、文件名对不上、尺寸不一致 → **该 slide 直接 0 分**，系统不容错；
+- 只接受单通道 8-bit PNG，像素值只有 0 / 255；
+- 提交目录要去掉中间的 `1.0/`，zip 里不能再套外层文件夹。
+
+### 8.1 先算分：`eval_binary.py`
+
+```powershell
+# 单折，官方口径
+python eval_binary.py --fold 1 --ckpt checkpoints3\fold1\best.pt
+
+# 扫后处理参数（本地真实病灶最小 83 px，所以 0~512 都试一遍）
+python eval_binary.py --fold 1 --ckpt checkpoints3\fold1\best.pt `
+  --sweep-min-area 0,64,128,256,512 --sweep-threshold 0.4,0.5,0.6
+```
+
+输出示例（列含义：综合分 / Dice / IoU / 真值全空却预测出前景的张数 / 肿瘤 patch 的 Dice）：
+
+```
+参数                            综合分    Dice     IoU     空真值FP    肿瘤Dice
+thr=0.50/area>=128          0.9xxx  0.9xxx  0.9xxx        12      0.8xxx
+```
+
+**关键认知**：本地 4953 张 patch 里 **4137 张（83.5%）真值全空**，
+「全部预测为空」的综合分就有 **≈0.835**。所以：
+
+- 空 patch 上出现一个假阳像素，该 patch 从 1.0 直接变 0，**代价极大**；
+- `min-area` 过滤几乎是免费收益（真实病灶最小 83 px，小于它的基本是噪点）；
+- 别只看总的 Dice，要盯「空真值FP」这一列。
+
+### 8.2 生成提交：`predict_test.py`
+
+```powershell
+python predict_test.py --test-root D:\data\toxpath_test `
+  --ckpt-dir checkpoints3 --tta --min-area 128 `
+  --out-dir submission --zip submission.zip
+```
+
+- `--ckpt-dir` 会把 `fold*/best.pt` 全部拿来做**概率平均集成**；单个模型用 `--ckpt`；
+- `--tta` 做 hflip/vflip 平均，约慢 3 倍，通常能涨一点点；
+- `--skip-existing` 可断点续跑；
+- 逐 patch 概率会记录到 `runs3\predict_test.jsonl`（**不放进提交目录**）。
+
+产物结构（只把 `.jpeg` 换成 `.png`，`1.0/` 去掉）：
+
+```
+submission\test_001\0_0.png        单通道 L、8-bit、0/255、尺寸同原图
+submission\test_001\1024_0.png
+submission.zip                     根目录直接是 test_001\...，无外层文件夹
+```
+
+> **不要**从 `test_images\*.tif` 重新切图。官方 patch 文件名编码了原图坐标，
+> 自己切的坐标系不同，会和真值对不上，导致整个 slide 评测失败。
+
+### 8.3 上传前自检：`check_submission.py`
+
+```powershell
+python scripts\check_submission.py --test-root D:\data\toxpath_test `
+  --submission submission --zip submission.zip
+```
+
+它按官方规则逐条查：slide 集合是否一致、文件名一一对应、数量、**尺寸是否等于原图**、
+是否单通道、像素值是否只有 0/255、zip 层级、以及前景占比是否合理。
+**退出码 0 才上传**；有 `FAIL` 就先修。
+
+自检能抓到的典型问题（都已用故障注入验证过）：
+
+| 注入的错误 | 自检输出 |
+|---|---|
+| 掩膜 512×512，原图 1024×1024 | `[FAIL] 尺寸 512x512，原图 1024x1024` |
+| 像素值是 128 的灰度图 | `[FAIL] 出现非 0/255 像素值 [128]` |
+| 少交一张 | `[FAIL] test_001 缺掩膜 1 张` |
+| 多交一张 | `[FAIL] test_001 多掩膜 1 张` |
+| 顶层放了 readme.txt | `[FAIL] 顶层杂项文件 1 个` |
+
+### 8.4 检查清单（提交前逐条打勾）
+
+- [ ] `eval_binary.py` 跑过，且有记录的最优 `min-area` / `threshold`
+- [ ] `predict_test.py` 跑完，`runs3\predict_test.jsonl` 行数 = 官方 patch 总数
+- [ ] `check_submission.py` **退出码 0**（无 FAIL）
+- [ ] zip 解压后根目录直接是 `test_001\`，没有多一层
+- [ ] 随机抽 10 张掩膜叠在原图上肉眼看过（`inference.py` 的三联图也可以）
+- [ ] ≤6 页方法说明论文准备好（官方硬性要求，没有就不进最终排名）
+- [ ] 提交后**不要**再改代码重跑，只有一次机会
+
+---
+
+## 9. 结果归档
 
 训练完把这几样拷到移动硬盘 / 课题组存储：
 
@@ -624,7 +721,7 @@ Compress-Archive -Path .\logs3, .\eval3 -DestinationPath D:\backup\toxpath_logs3
 
 ---
 
-## 9. 常见问题（Windows 特有）
+## 10. 常见问题（Windows 特有）
 
 | 现象 | 原因 / 处理 |
 |---|---|
@@ -652,7 +749,7 @@ Compress-Archive -Path .\logs3, .\eval3 -DestinationPath D:\backup\toxpath_logs3
 
 ---
 
-## 10. 一次跑通的检查清单
+## 11. 一次跑通的检查清单
 
 - [ ] `nvidia-smi` 看到 RTX 4090、24 GB、驱动 ≥ 550，且没有别人占卡
 - [ ] `python -c "import torch; print(torch.cuda.is_available())"` → `True`

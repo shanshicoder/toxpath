@@ -175,6 +175,41 @@ python evaluate.py --fold 1 --ckpt <任意.pt> --image-size 224 `
 | `tissue_*` 组织区域内 | 同上（Otsu 剔除白色空背景） | **主指标**，写报告用 |
 | `patch_acc` | 预测前景占比按 0.01%/5% 分箱 vs 真值 | 「少量 vs 较多」分级准确率 |
 
+## 比赛提交（ToxPath AI Challenge 2026）
+
+官方口径和上面那三层**不是一回事**，提交前必须用 `eval_binary.py` 打分：
+
+- 逐 patch 算**二值** Dice / IoU，单张得分 = `(Dice + IoU) / 2`；
+- 真值与预测**都全空**的 patch 记 **1.0**（本地 83.5% 的 patch 属于这类，
+  所以「全预测为空」的综合分就有 **≈0.835**）；
+- 最终分是**所有 patch 的等权平均**，slide 级只作参考。
+
+```powershell
+# 1) 官方口径打分 + 后处理参数扫描
+python eval_binary.py --fold 1 --ckpt checkpoints3\fold1\best.pt `
+    --sweep-min-area 0,64,128,256 --sweep-threshold 0.4,0.5,0.6
+
+# 2) 生成提交（5 折集成 + TTA）
+python predict_test.py --test-root D:\data\toxpath_test `
+    --ckpt-dir checkpoints3 --tta --min-area 128 `
+    --out-dir submission --zip submission.zip
+
+# 3) 上传前自检（缺文件/尺寸/像素值/zip 层级都会查，有错退出码 1）
+python scripts\check_submission.py --test-root D:\data\toxpath_test `
+    --submission submission --zip submission.zip
+```
+
+提交物结构（**只把 `.jpeg` 换成 `.png`，中间 `1.0/` 要去掉**）：
+
+```
+submission/test_001/0_0.png        ← 单通道 L、8-bit、值只有 0/255、尺寸同原图
+submission/test_001/1024_0.png
+submission.zip                     ← 根目录直接是 test_001/...，不套外层文件夹
+```
+
+**不要**从 `test_images/*.tif` 重新切图：官方 patch 文件名编码了原图坐标，
+自己切的坐标系不同，会和真值对不上。
+
 ## 目录
 
 ```
@@ -203,13 +238,16 @@ toxpath/
 │   └── make_3class_masks.py  # 二值 mask → 彩色三分类 mask
 ├── tests/
 │   ├── test_dataset.py       # Dataset 35 项测试
-│   └── test_model_forward.py # 模型形状/反传/冻结/权重往返 8 项测试
+│   ├── test_model_forward.py # 模型形状/反传/冻结/权重往返 8 项测试
+│   └── test_submission.py    # 提交链路 22 项（指标/后处理/PNG/zip/自检，不需要 torch）
 ├── docs/
 │   └── 本地训练SOP.md        # Windows + 4090 全流程（电源设置、续训、故障排查）
 ├── paths.py                  # 数据根/权重统一解析（命令行>环境变量>项目内>历史）
 ├── splits.py                 # 切片发现 + 按肿瘤负荷分层分折（自适应切片数）
 ├── inference.py              # 推理：彩色预测图 / 三联对比图 / Otsu 组织掩膜
-├── evaluate.py               # 正式评测：整图 + 组织区域 + patch 分级，5 折汇总
+├── evaluate.py               # 诊断评测：整图 + 组织区域 + patch 分级，5 折汇总
+├── eval_binary.py            # 官方口径打分：逐 patch Dice/IoU，阈值×最小面积扫描
+├── predict_test.py           # 生成提交：test_patches → {slide}/{name}.png + zip
 └── train_3class.py           # 5 折训练脚本（AMP + 梯度累积）
 ```
 

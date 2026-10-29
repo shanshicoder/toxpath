@@ -25,6 +25,7 @@ eval3/
 runs/
 runs3/
 outputs/
+submission/
 *.pt
 *.pth
 *.log
