@@ -14,8 +14,9 @@
 三个解码头换成一个 3 类语义头：encoder 85.7 M + neck 14.3 M + decoder 14.0 M
 = **114.1 M** 参数。
 
-> 项目当前**只保留模型定义与训练代码**。推理、评测、比赛提交、打包脚本已从工作区
-> 移除（仍完整保存在 git 历史里），需要时见文末「恢复旧文件」。
+> 项目主体是**模型定义 + 训练**；推理（`inference.py`）与二值导出（`predict_test.py`）
+> 保留在仓库里，评测、打包、旧的同步脚本已从工作区移除（仍完整保存在 git 历史里），
+> 需要时见文末「恢复旧文件」。实验室机器上的完整操作步骤见 `docs/本地训练SOP.md`。
 
 ## 目录结构
 
@@ -41,6 +42,8 @@ toxpath/
 │   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
 │   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
 │   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
+├── docs/
+│   └── 本地训练SOP.md        # 实验室机器上的完整操作手册（照抄即可）
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
 ```
@@ -289,5 +292,6 @@ git checkout 2ed284a -- predict_test.py
 git checkout 2ed284a -- scripts docs tests
 ```
 
-`2ed284a` 里的 `docs/本地训练SOP.md` 是完整 SOP（环境、权重下载、断电续训、
-比赛提交规范与实测数据），需要时取回即可。
+`2ed284a` 里还有一份历史版本的 `docs/本地训练SOP.md`（含已废弃的云端方案与提交脚本说明），
+需要考古时再取；**当前有效的 SOP 是本仓库的 `docs/本地训练SOP.md`**，已按
+`run_train.ps1` + TensorBoard + 连通域标签的现状重写。
