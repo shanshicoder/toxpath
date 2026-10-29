@@ -31,15 +31,14 @@ toxpath/
 │   └── toxpath.py            #   ToxPathSegmentor：encoder → neck → decoder
 ├── dataset/
 │   └── toxpath3_dataset.py   # 读 patch + 三分类掩膜，按类别加权采样
-├── train_3class.py           # 训练入口（单折 / 多折 / 续训）
-├── monitor.py                # 训练监控网页（零依赖，浏览器看曲线 / ETA / GPU）
+├── train_3class.py           # 训练入口（单折 / 多折 / 续训），曲线写 TensorBoard
 ├── inference.py              # checkpoint 加载、前向、Otsu 组织掩膜
 ├── predict_test.py           # 三分类 → 二值肿瘤掩膜，按官方规范出提交 zip
 ├── splits.py                 # 按切片做蛇形分折（切片数自适应）
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
 │   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
-│   └── run_train.ps1         # 实验室启动器：后台训练 + 日志落盘 + 断远程桌面不中断
+│   └── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
 ```
@@ -56,7 +55,7 @@ toxpath/
 conda create -n toxpath python=3.10 -y
 conda activate toxpath
 pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision   # 4090
-pip install timm==1.0.8 numpy Pillow
+pip install timm==1.0.8 numpy Pillow tensorboard
 ```
 
 CPU 机器（只验形状）把第一行换成 `.../whl/cpu`。
@@ -113,6 +112,8 @@ python train_3class.py --fold 1 --epochs 24 --resume checkpoints3/fold1/last.pt
 | `--init` | encoder+neck | 可选 `none`/`encoder`/`encoder+neck`/`full` |
 | `--freeze-encoder` | 关 | 显存吃紧时开 |
 | `--amp` | 开 | CUDA 上 bfloat16 |
+| `--tb-dir` | `logs3/tb` | TensorBoard 事件根目录，每折一个 `fold{N}` 子目录 |
+| `--tensorboard` / `--no-tensorboard` | 开 | 关掉就只训练、不写曲线 |
 
 产物：
 
@@ -122,11 +123,12 @@ checkpoints3/
 ├── fold1/best.pt               # dice_fg 最好的那个 epoch
 ├── fold1/last.pt               # 续训用
 └── summary.json                # 多折汇总（全折模式）
-logs3/fold1/live.jsonl          # 每 log_every 步一行 → monitor.py 实时曲线
-logs3/fold1/train_log.json      # 逐 epoch 的 loss / dice / acc
+logs3/tb/fold1/                 # TensorBoard 事件（曲线 + 预览图），见「TensorBoard」一节
+logs3/fold1/train_log.json      # 逐 epoch 的 loss / dice / acc（纯文本备份）
+logs3/train_*.out.log           # 启动器重定向的控制台输出
 ```
 
-## 实验室机器：跑起来 + 监控（4090）
+## 实验室机器：跑起来 + 看曲线（4090）
 
 ### 一次性准备
 
@@ -134,7 +136,7 @@ logs3/fold1/train_log.json      # 逐 epoch 的 loss / dice / acc
 git clone git@github.com:shanshicoder/toxpath.git D:\work\toxpath   # 或 git pull
 conda create -n toxpath python=3.10 -y ; conda activate toxpath
 pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
-pip install timm==1.0.8 numpy Pillow
+pip install timm==1.0.8 numpy Pillow tensorboard
 ```
 
 - **权重（271 MB）**：`git checkout 2ed284a -- scripts/fetch_weights.ps1` 取回下载
@@ -165,26 +167,38 @@ Get-Process -Id <PID>                                   # 还活着吗
 Stop-Process -Id <PID>                                  # 停止
 ```
 
-### 监控网页
+### TensorBoard 看曲线
 
-另开一个窗口：
+训练时每个 epoch 自动写 `logs3/tb/fold{N}/`，另开一个窗口把服务起来：
 
 ```powershell
-python monitor.py            # 默认 http://0.0.0.0:8787，每 5 秒自动刷新
+.\scripts\run_train.ps1 -Mode tb              # 默认 6006，加 -Port 6010 换端口
+# 等价于：python -m tensorboard.main --logdir logs3/tb --port 6006 --host 0.0.0.0
 ```
 
-浏览器打开 `http://127.0.0.1:8787`（本机）或 `http://<实验室机器IP>:8787`
-（同一局域网）。显示内容：当前折 / epoch / step 与总进度、速度与 ETA、
-训练 loss 实时曲线、验证 dice_fg 曲线（带 0.835 全空基线虚线）、逐 epoch
-明细表、GPU 型号 / 占用 / 温度。
+浏览器打开 `http://127.0.0.1:6006`（本机）或 `http://<实验室机器IP>:6006`（局域网）。
+训练与看板互不依赖：先开训练后开看板、看板关掉再开，曲线都在，服务会自己
+发现新事件文件。
 
-- 数据源是 `logs3\fold*\live.jsonl`：训练每 `--log-every` 步追加一行，
-  看板轮询读取；训练结束后文件保留，可回看整条曲线；
-- 零第三方依赖、页面不引 CDN，实验室断网也能用；
-- 局域网访问不通时：管理员 PowerShell 执行
-  `netsh advfirewall firewall add rule name="ToxPath Monitor" dir=in action=allow protocol=TCP localport=8787`；
-  跨网段则在本机做转发 `ssh -L 8787:127.0.0.1:8787 用户名@实验室IP`；
-- **没有鉴权**，只当内网工具用，不要暴露到公网；只想本机看就加 `--host 127.0.0.1`。
+页面上能看到的：
+
+| 页签 | 内容 |
+|---|---|
+| SCALARS | `fold1/train_step/loss`（每 `--log-every` 步）、`fold1/train/*` 与 `fold1/val/*`（每 epoch）、`time/it_per_s`、`time/epoch_min`、`train/lr` |
+| IMAGES | `fold1/preview`：每 epoch 一张 `原图 \| 真值 \| 预测` 三联图，按 step 滑块回看 |
+| TEXT | `fold1/config`：这次运行的尺寸、lr、类别权重、验证切片等配置快照 |
+
+几条使用要点：
+
+- **五折各是一个独立的 run**（`fold1`…`fold5`），左侧勾多个就能把同一指标叠在一张图里对比；
+- 想把 `val/dice_fg` 和"全猜空"比：同理勾上各折，注意 `fold1/val/dice_fg_allbg_baseline` 记录的
+  是验证集里真值全空的 patch 占比——曲线贴着它走说明模型还没学到东西；
+- **重跑同一折会自动换目录**（`fold1_20261029-203015`），不会和上次的曲线叠在一起；
+- 局域网访问不通：管理员 PowerShell 执行
+  `netsh advfirewall firewall add rule name=TensorBoard dir=in action=allow protocol=TCP localport=6006`；
+  跨网段用 `ssh -L 6006:127.0.0.1:6006 用户名@实验室IP` 转发；
+- **无鉴权**，只当内网工具，别暴露公网；只本机看就加 `--host 127.0.0.1`；
+- 不想写曲线加 `--no-tensorboard`（`tensorboard` 只是可选依赖，没装也照常训练）。
 
 ## 三分类 → 二值肿瘤掩膜
 

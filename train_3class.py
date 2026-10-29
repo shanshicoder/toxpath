@@ -57,13 +57,21 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
+
+try:  # tensorboard 是可选依赖：没装也能训练，只是不写曲线
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:  # pragma: no cover - 仅在缺包时触发
+    SummaryWriter = None  # type: ignore[assignment,misc]
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dataset import (  # noqa: E402
+    BIOPTIMUS_MEAN,
+    BIOPTIMUS_STD,
     Dataset3Config,
     build_dataset3,
     build_weighted_sampler,
@@ -91,6 +99,8 @@ from splits import (  # noqa: E402
 # 项目内相对路径 > 历史绝对路径」的顺序解析，换机器不用改代码。
 DEFAULT_OUT_DIR: Path = PROJECT_ROOT / "checkpoints3"
 DEFAULT_LOG_DIR: Path = PROJECT_ROOT / "logs3"
+DEFAULT_TB_DIR: Path = PROJECT_ROOT / "logs3" / "tb"
+"""TensorBoard 事件目录。``tensorboard --logdir logs3/tb`` 就能看到全部折。"""
 
 DEFAULT_NUM_FOLDS: int = 5
 """默认折数。切片数少于它时会在 ``splits.build_slide_folds`` 里自动降低。"""
@@ -253,65 +263,131 @@ def _set_bn_eval(model: nn.Module) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 实时日志（monitor.py 的看板读这里）
+# TensorBoard 记录
 # --------------------------------------------------------------------------- #
-def _json_safe(value: Any) -> Any:
-    """把 NaN / ±inf 换成 ``None``，递归处理 dict / list。
+def create_writer(tb_root: Path, fold: int) -> "SummaryWriter":
+    """为当前折建一个 ``SummaryWriter``，默认目录 ``<tb_root>/fold{N}``。
 
-    Python 的 ``json.dumps`` 默认允许 NaN，写出来是非法 JSON 字面量，
-    浏览器 ``JSON.parse`` 会直接报错。看板宁可显示 "—" 也不能整页崩。
+    若该目录里已经有上一次的 event 文件，则自动追加时间戳后缀。原因是
+    TensorBoard 不会覆盖同 tag 同 step 的旧值：重跑同一折时若继续写同一目录，
+    两张图的点会叠在一起，看起来像曲线在抖。
     """
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    return value
+    run_dir: Path = tb_root / f"fold{fold}"
+    if any(run_dir.glob("events.out.tfevents.*")):
+        run_dir = tb_root / f"fold{fold}_{time.strftime('%Y%m%d-%H%M%S')}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # flush_secs 默认 120 s，远程看板会以为训练卡死；10 s 兼顾实时性和写盘开销
+    writer = SummaryWriter(log_dir=str(run_dir), flush_secs=10)
+    print(f"[tensorboard] 曲线写入 {run_dir}")
+    return writer
 
 
-class LiveLogger:
-    """把训练进度逐条追加到 JSONL，供 ``monitor.py`` 的网页看板实时读取。
+def tb_tag(fold: int, *parts: str) -> str:
+    """折内统一的 tag 前缀：``fold1/train/loss``。
 
-    每写一行立即 flush，进程被 kill 也不会丢掉已写的内容。行格式分三种：
-
-    - ``{"event": "start", ...}`` 折开始时写一次，含 epochs / image_size 等配置，
-      看板靠它算 ETA；
-    - ``{"event": "step", ...}`` 每 ``log_every`` 步写一行，画 loss 曲线用；
-    - ``{"event": "epoch", ...}`` 每个 epoch 验证完写一行，含 val 指标。
-
-    Parameters
-    ----------
-    path:
-        目标文件，通常是 ``logs3/fold{N}/live.jsonl``。
+    多折各写各的 run（目录不同），再叠一层 fold 前缀，是为了把五折的
+    event 拷到一个目录里时也能分清。
     """
+    return "/".join((f"fold{fold}", *parts))
 
-    def __init__(self, path: Path) -> None:
-        self.path: Path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # "w" 而不是 "a"：每次重跑该折都从头记，避免看板混入上一次的旧曲线
-        self._fh = path.open("w", encoding="utf-8")
 
-    def write(self, record: dict[str, Any]) -> None:
-        """追加一行 JSON 并立即落盘。
+def add_finite(writer: "SummaryWriter", tag: str, value: float, step: int) -> None:
+    """只写有限值。
 
-        NaN / inf 一律转成 ``null``：Python 的 ``json`` 默认会写出 ``NaN``
-        这种非法字面量，浏览器那边的 ``JSON.parse`` 会直接抛错。
-        """
-        record.setdefault("ts", round(time.time(), 3))
-        self._fh.write(json.dumps(_json_safe(record), ensure_ascii=False) + "\n")
-        self._fh.flush()
+    ``dice_c1`` 在小折上可能整折没有该类样本，算出来是 NaN；TensorBoard 会
+    把 NaN 画成断点，冒烟时图上满屏缺口反而看不懂。直接跳过更干净。
+    """
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        writer.add_scalar(tag, float(value), step)
 
-    def close(self) -> None:
-        if not self._fh.closed:
-            self._fh.close()
 
-    def __enter__(self) -> "LiveLogger":
-        return self
+def log_epoch(
+    writer: "SummaryWriter",
+    *,
+    fold: int,
+    epoch: int,
+    train_stats: dict[str, float],
+    val_stats: dict[str, float],
+    lr: float,
+    minutes: float,
+    it_per_s: float,
+) -> None:
+    """把一个 epoch 的标量写进 TensorBoard。
 
-    def __exit__(self, *exc: object) -> bool:
-        self.close()
-        return False
+    tag 分三组：
+
+    - ``train/*``：本 epoch 的训练均值（步级曲线在 ``train_step/*``，别混）
+    - ``val/*``：验证指标，只在跑了验证的 epoch 才有点
+    - ``time/*``：耗时与吞吐，用来判断是不是该换 ``num-workers`` 了
+    """
+    add_finite(writer, tb_tag(fold, "train", "loss"), train_stats["loss"], epoch)
+    add_finite(writer, tb_tag(fold, "train", "ce"), train_stats["ce"], epoch)
+    add_finite(writer, tb_tag(fold, "train", "dice_loss"),
+               train_stats["dice_loss"], epoch)
+    add_finite(writer, tb_tag(fold, "train", "lr"), lr, epoch)
+    add_finite(writer, tb_tag(fold, "time", "epoch_min"), minutes, epoch)
+    add_finite(writer, tb_tag(fold, "time", "it_per_s"), it_per_s, epoch)
+
+    for key, tag in (
+        ("loss", "val/loss"),
+        ("dice_c1", "val/dice_c1"),
+        ("dice_c2", "val/dice_c2"),
+        ("dice_fg", "val/dice_fg"),
+        ("iou_fg", "val/iou_fg"),
+        ("pixel_acc", "val/pixel_acc"),
+    ):
+        if key in val_stats:
+            add_finite(writer, tb_tag(fold, tag), val_stats[key], epoch)
+
+
+# 与 ``dataset.CLASS_COLORS`` 保持一致：0 黑 / 1 绿 / 2 红
+_CLASS_RGB: Tensor = torch.tensor(
+    [[0, 0, 0], [0, 255, 0], [255, 0, 0]], dtype=torch.uint8
+)
+
+
+@torch.no_grad()
+def make_preview(
+    model: ToxPathSegmentor,
+    batch: dict[str, Any],
+    device: torch.device,
+    *,
+    max_items: int = 3,
+    tile: int = 256,
+) -> Tensor | None:
+    """拼一行 ``原图 | 真值 | 预测``，返回 ``[3, H, W]`` uint8，给 ``add_image`` 用。
+
+    看 dice 数字只能知道"错了多少"，看不出是整片漏检还是边界糊。每个验证
+    epoch 存一张图，在 TensorBoard 的 IMAGES 页翻一遍比读表快得多。
+
+    任何异常都返回 ``None``：可视化失败绝不能把训练搞挂。
+    """
+    try:
+        images: Tensor = batch["image"].to(device)
+        masks: Tensor = batch["mask"].to(device)
+        pred: Tensor = model(images).argmax(dim=1)
+
+        mean = torch.tensor(BIOPTIMUS_MEAN, device=device).view(3, 1, 1)
+        std = torch.tensor(BIOPTIMUS_STD, device=device).view(3, 1, 1)
+        colors = _CLASS_RGB.to(device)
+
+        tiles: list[Tensor] = []
+        for b in range(min(max_items, images.shape[0])):
+            # 反归一化回 0~1，否则存进去只是一张彩色噪声
+            rgb: Tensor = (images[b].float() * std + mean).clamp(0.0, 1.0)
+            gt_rgb: Tensor = colors[masks[b].long()].permute(2, 0, 1).float() / 255.0
+            pd_rgb: Tensor = colors[pred[b].long()].permute(2, 0, 1).float() / 255.0
+            tiles.extend([rgb, gt_rgb, pd_rgb])
+
+        panel: Tensor = torch.cat(
+            [F.interpolate(t.unsqueeze(0), size=(tile, tile), mode="nearest")
+             for t in tiles],
+            dim=3,
+        )
+        return (panel[0] * 255.0).round().clamp(0, 255).to(torch.uint8)
+    except Exception as exc:  # noqa: BLE001 - 可视化是锦上添花，失败就跳过
+        print(f"[warn] TensorBoard 预览图生成失败，跳过：{type(exc).__name__}: {exc}")
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -329,13 +405,13 @@ def train_one_epoch(
     amp: bool,
     freeze_bn: bool,
     log_every: int = 20,
-    live: LiveLogger | None = None,
+    writer: "SummaryWriter | None" = None,
     fold: int = 0,
 ) -> dict[str, float]:
     """跑一个训练 epoch（支持梯度累积与 AMP）。
 
-    ``live`` 不为空时，每 ``log_every`` 步往 JSONL 追加一行 step 记录，
-    供 ``monitor.py`` 的看板画实时曲线。
+    ``writer`` 不为空时，每 ``log_every`` 步写一次步级曲线（``train_step/*``），
+    x 轴是全局步数 ``(epoch-1) * n_batches + i``，续训时也连续。
     """
     model.train()
     if freeze_bn:
@@ -374,19 +450,17 @@ def train_one_epoch(
             print(f"  [epoch {epoch} {i+1}/{n_batches}] "
                   f"loss={losses[-1]:.4f} ce={ces[-1]:.4f} dice={dices[-1]:.4f} "
                   f"({speed:.2f} it/s)")
-            if live is not None:
-                live.write({
-                    "event": "step",
-                    "fold": fold,
-                    "epoch": epoch,
-                    "step": i + 1,
-                    "total": n_batches,
-                    "loss": losses[-1],
-                    "ce": ces[-1],
-                    "dice": dices[-1],
-                    "it_s": round(1.0 / max(speed, 1e-6), 3),
-                    "lr": float(optimizer.param_groups[0]["lr"]),
-                })
+            if writer is not None:
+                # 全局步数而非 epoch 内步数：这样跨 epoch、跨续训连成一条线
+                gstep: int = (epoch - 1) * n_batches + (i + 1)
+                add_finite(writer, tb_tag(fold, "train_step", "loss"),
+                           losses[-1], gstep)
+                add_finite(writer, tb_tag(fold, "train_step", "ce"),
+                           ces[-1], gstep)
+                add_finite(writer, tb_tag(fold, "train_step", "dice_loss"),
+                           dices[-1], gstep)
+                add_finite(writer, tb_tag(fold, "train_step", "it_per_s"),
+                           speed, gstep)
 
     return {
         "loss": float(np.mean(losses)) if losses else float("nan"),
@@ -571,21 +645,40 @@ def train_fold(
     fold_log.mkdir(parents=True, exist_ok=True)
     history: list[dict[str, Any]] = []
 
-    # 实时日志：monitor.py 读这个文件画曲线，第一行带配置供看板算 ETA
-    live = LiveLogger(fold_log / "live.jsonl")
-    live.write({
-        "event": "start",
-        "fold": fold,
-        "epochs": args.epochs,
-        "start_epoch": start_epoch,
-        "samples_per_epoch": args.samples_per_epoch,
-        "image_size": args.image_size,
-        "batch_size": args.batch_size,
-        "grad_accum": args.grad_accum,
-        "n_train_slides": len(train_slides),
-        "val_slides": list(val_slides),
-        "init": args.init,
-    })
+    # ---- TensorBoard ----
+    writer = create_writer(args.tb_dir, fold) if args.tensorboard else None
+    if writer is not None:
+        # TEXT 页留一份配置快照：几天后回头看曲线时，能确认当时是什么参数
+        cfg_text: str = "\n".join([
+            f"- fold: {fold}",
+            f"- val_slides: {', '.join(val_slides)}",
+            f"- n_train_slides: {len(train_slides)}",
+            f"- epochs: {start_epoch}..{args.epochs}",
+            f"- image_size: {args.image_size}",
+            f"- batch_size: {args.batch_size}  grad_accum: {args.grad_accum}",
+            f"- samples_per_epoch: {args.samples_per_epoch}",
+            f"- lr: {args.lr}  encoder_lr_mult: {args.encoder_lr_mult}",
+            f"- init: {args.init}  freeze_encoder: {args.freeze_encoder}",
+            f"- class_weights: {list(args.class_weights)}",
+            f"- device: {device}  amp: {amp}",
+        ])
+        writer.add_text(tb_tag(fold, "config"), cfg_text, 0)
+        # 参考线：真值全空的 patch 占多少，全猜空就能拿到多少 Dice。
+        # 曲线贴着这条线走，说明模型还没学到东西。
+        fg_ratios: np.ndarray = np.asarray(
+            [float(x) for x in getattr(val_loader.dataset, "fg_ratios", [])],
+            dtype=np.float64,
+        )
+        if fg_ratios.size:
+            add_finite(writer, tb_tag(fold, "val", "dice_fg_allbg_baseline"),
+                       float((fg_ratios <= 0.0).mean()), 0)
+        # 固定用验证集第一个 batch 出预览图，跨 epoch 才能看出同图的变化
+        try:
+            preview_batch: dict[str, Any] | None = next(iter(val_loader))
+        except (StopIteration, TypeError):
+            preview_batch = None
+    else:
+        preview_batch = None
 
     for epoch in range(start_epoch, args.epochs + 1):
         t_epoch: float = time.time()
@@ -593,7 +686,7 @@ def train_fold(
             model, train_loader, criterion, optimizer, device,
             epoch=epoch, grad_accum=args.grad_accum, amp=amp,
             freeze_bn=args.freeze_bn, log_every=args.log_every,
-            live=live, fold=fold,
+            writer=writer, fold=fold,
         )
 
         do_val: bool = (epoch % args.val_every == 0) or (epoch == args.epochs)
@@ -620,18 +713,20 @@ def train_fold(
             json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-        # 只挑标量指标写进实时日志，逐切片的明细留在 train_log.json
-        live.write({
-            "event": "epoch",
-            "fold": fold,
-            "epoch": epoch,
-            "minutes": round((time.time() - t_epoch) / 60.0, 2),
-            "train_loss": train_stats["loss"],
-            "train_dice_loss": train_stats["dice_loss"],
-            **{k: float(val_stats[k]) for k in
-               ("loss", "dice_c1", "dice_c2", "dice_fg", "iou_fg", "pixel_acc")
-               if k in val_stats},
-        })
+        # 逐 epoch 标量 + 一行预览图（原图 | 真值 | 预测），只在跑了验证时写
+        if writer is not None:
+            elapsed: float = time.time() - t_epoch
+            log_epoch(
+                writer, fold=fold, epoch=epoch,
+                train_stats=train_stats, val_stats=val_stats,
+                lr=float(optimizer.param_groups[0]["lr"]),
+                minutes=elapsed / 60.0,
+                it_per_s=len(train_loader) / max(elapsed, 1e-6),
+            )
+            if do_val and preview_batch is not None:
+                panel = make_preview(model, preview_batch, device)
+                if panel is not None:
+                    writer.add_image(tb_tag(fold, "preview"), panel, epoch)
 
         if not do_val:
             continue
@@ -653,9 +748,12 @@ def train_fold(
     (fold_out / "history.json").write_text(
         json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    live.write({"event": "done", "fold": fold, "best_dice_fg": best_fg,
-                "epochs_done": len(history)})
-    live.close()
+    if writer is not None:
+        add_finite(writer, tb_tag(fold, "val", "best_dice_fg"), best_fg, 0)
+        writer.flush()
+        writer.close()
+        print(f"[tensorboard] fold{fold} 记录完成，运行 "
+              f"`tensorboard --logdir {args.tb_dir}` 查看")
     return {
         "fold": fold,
         "val_slides": list(val_slides),
@@ -723,6 +821,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="每 N 个 epoch 保存一次 last.pt（best.pt 每次提升都会存）")
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    p.add_argument("--tb-dir", type=Path, default=DEFAULT_TB_DIR,
+                   help="TensorBoard 事件目录，每折一个子目录 fold{N}")
+    p.add_argument("--tensorboard", action=argparse.BooleanOptionalAction,
+                   default=True, help="写 TensorBoard 曲线（--no-tensorboard 关闭）")
     p.add_argument("--resume", type=Path, default=None)
     p.add_argument("--max-train-samples", type=int, default=0, help=">0 时只取前 N 个（冒烟）")
     p.add_argument("--max-val-samples", type=int, default=0)
@@ -732,6 +834,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     set_seed(args.seed)
+
+    if args.tensorboard and SummaryWriter is None:
+        print("[error] 开了 --tensorboard 但环境里没有 tensorboard，装一下：\n"
+              "        pip install tensorboard\n"
+              "        或者加 --no-tensorboard 只训练、不记曲线。", file=sys.stderr)
+        return 2
 
     # ---- 0) 路径解析（换机器不用改代码：命令行 > 环境变量 > 项目内 > 历史路径）
     try:

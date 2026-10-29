@@ -11,26 +11,34 @@
 #   fold    train a single fold
 #   all     train all folds (leave-one-slide-out)
 #   resume  continue a fold from checkpoints3\foldN\last.pt
+#   tb      serve TensorBoard on logs3\tb (run this in a second window)
 #
 # Examples:
 #   .\scripts\run_train.ps1 -Mode smoke
 #   .\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12
 #   .\scripts\run_train.ps1 -Mode all -Epochs 12
 #   .\scripts\run_train.ps1 -Mode resume -Fold 1 -Epochs 20
+#   .\scripts\run_train.ps1 -Mode tb                    # then open http://<lab-ip>:6006
 #   .\scripts\run_train.ps1 -Mode fold -Fold 1 -DataRoot "D:\data\toxpath"
 #   .\scripts\run_train.ps1 -Mode fold -Foreground      # keep it attached (Ctrl+C works)
+#
+# Curves go to TensorBoard (logs3\tb\fold{N}); the plain-text log under logs3\
+# is still the authoritative record of what happened.
 #
 # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1 as ANSI
 # unless the file has a UTF-8 BOM, and non-ASCII comments would be garbled.
 
 [CmdletBinding()]
 param(
-    [ValidateSet("smoke", "fold", "all", "resume")]
+    [ValidateSet("smoke", "fold", "all", "resume", "tb")]
     [string]$Mode = "fold",
 
     [int]$Fold = 1,
 
     [int]$Epochs = 12,
+
+    # TensorBoard port for -Mode tb
+    [int]$Port = 6006,
 
     # Empty = let paths.py resolve it (TOXPATH_DATA_ROOT / data\toxpath / ...)
     [string]$DataRoot = "",
@@ -76,7 +84,8 @@ switch ($Mode) {
             "--device", "cpu",
             "--init", "none",
             "--out-dir", "_smoke/ckpt",
-            "--log-dir", "_smoke/log"
+            "--log-dir", "_smoke/log",
+            "--tb-dir", "_smoke/tb"
         )
     }
     "fold" {
@@ -107,6 +116,10 @@ switch ($Mode) {
             "--resume", $last,
             "--num-workers", "$NumWorkers"
         ) + $common
+    }
+    "tb" {
+        # Serves TensorBoard; handled below once the environment is cleaned up.
+        $trainArgs = @()
     }
 }
 
@@ -145,11 +158,50 @@ if ($dropped.Count) {
 
 # Force the child's stdout/stderr to UTF-8. Without this, redirected logs
 # contain GBK-mangled Chinese text (the console codepage differs from the
-# file encoding). live.jsonl is already written as UTF-8 by the trainer.
+# file encoding). TensorBoard event files are binary and unaffected.
 [System.Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
+
+# -Mode tb: serve TensorBoard, detached so closing RDP does not kill it.
+if ($Mode -eq "tb") {
+    # find_spec only checks presence - importing tensorboard prints warnings
+    # to stderr, which PowerShell 5.1 turns into NativeCommandError.
+    & $PythonExe -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('tensorboard') else 1)" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "tensorboard is not installed for $PythonExe - run: `"$PythonExe`" -m pip install tensorboard"
+    }
+    if (-not (Test-Path "logs3\tb")) {
+        Write-Host "[tb     ] logs3\tb not found - no run has written curves yet."
+        New-Item -ItemType Directory -Path "logs3\tb" | Out-Null
+    }
+    $tbStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $tbOut = "logs3\tb_$tbStamp.out.log"
+    $tbErr = "logs3\tb_$tbStamp.err.log"
+    $tbProc = Start-Process -FilePath $PythonExe `
+        -ArgumentList @("-m", "tensorboard.main", "--logdir", "logs3/tb",
+                        "--port", "$Port", "--host", "0.0.0.0") `
+        -WorkingDirectory $Root `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $tbOut `
+        -RedirectStandardError $tbErr `
+        -PassThru
+    Write-Host ("[pid    ] {0}" -f $tbProc.Id)
+    Write-Host "[url    ] http://127.0.0.1:$Port/    LAN: http://<this-pc-ip>:$Port/"
+    Write-Host ("[stdout ] {0}" -f $tbOut)
+    Write-Host "[tips   ] page is live after ~10 s; training appends to it automatically"
+    Write-Host "[tips   ] firewall     : netsh advfirewall firewall add rule name=TensorBoard dir=in action=allow protocol=TCP localport=$Port"
+    Write-Host "[tips   ] stop serving : Stop-Process -Id $($tbProc.Id)"
+    exit 0
+}
 
 if ($Foreground) {
     Write-Host ("[run    ] {0} {1}" -f $PythonExe, ($trainArgs -join " "))
+    # PS 5.1 converts ANY native stderr output into a terminating error while
+    # $ErrorActionPreference is 'Stop', and torch/timm emit FutureWarnings on
+    # every start. Relax it for the child and trust the exit code instead.
+    $ErrorActionPreference = 'Continue'
+    # The child writes UTF-8 (PYTHONUTF8=1); without this the console decodes
+    # it as GBK and the Chinese log lines turn into mojibake.
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     & $PythonExe @trainArgs
     exit $LASTEXITCODE
 }
@@ -169,7 +221,7 @@ Write-Host ("[stderr ] {0}" -f $errLog)
 Write-Host ""
 Write-Host "[tips   ] live tail      : Get-Content $outLog -Wait -Tail 20"
 Write-Host "[tips   ] still running  : Get-Process -Id $($proc.Id)"
-Write-Host "[tips   ] monitor page   : python monitor.py   ->  http://127.0.0.1:8787"
+Write-Host "[tips   ] curves         : .\scripts\run_train.ps1 -Mode tb   ->  http://127.0.0.1:6006"
 Write-Host "[tips   ] stop training  : Stop-Process -Id $($proc.Id)"
 Write-Host ""
 Write-Host "Detached from this window: closing RDP will NOT kill it."
