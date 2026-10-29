@@ -55,6 +55,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# PS 5.1 在 Stop 模式下会把原生命令写 stderr 当成终止性错误，而 git 往 stderr
+# 写的东西（进度、warning、"To <url>"、认证提示）全是正常输出。所有 git 调用
+# 统一走这个包装器：临时放宽 EAP，用退出码判断成败。
+function Invoke-Git {
+    param([string[]]$GitArgs)
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & git @GitArgs
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $old
+    }
+}
+
 # 控制台统一 UTF-8，避免中文提示在 cmd / PowerShell 里乱码
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
@@ -172,13 +188,13 @@ else {
         Write-Host "[dry ] 将执行：git add -A；git commit -m `"$msg`"" -ForegroundColor Yellow
     }
     else {
-        git add -A
-        if ($LASTEXITCODE -ne 0) {
+        $addCode = Invoke-Git @('add', '-A')
+        if ($addCode -ne 0) {
             Write-Host '[fail] git add 失败' -ForegroundColor Red
             exit 3
         }
-        git commit -q -m $msg
-        if ($LASTEXITCODE -ne 0) {
+        $commitCode = Invoke-Git @('commit', '-q', '-m', $msg)
+        if ($commitCode -ne 0) {
             Write-Host '[fail] git commit 失败（可能触发 pre-commit hook）' -ForegroundColor Red
             exit 3
         }
@@ -286,8 +302,7 @@ if ($hasUpstream -and $ahead -eq 0) {
     exit 0
 }
 
-git @pushArgs
-$pushCode = $LASTEXITCODE
+$pushCode = Invoke-Git $pushArgs
 
 if ($pushCode -ne 0) {
     Write-Host ''
@@ -306,7 +321,7 @@ if ($pushCode -ne 0) {
 if ($useHttps) {
     $refspec = 'refs/heads/' + $branch + ':refs/remotes/origin/' + $branch
     $fetchArgs = $proxyArgs + @('fetch', $pushUrl, $refspec)
-    $null = git @fetchArgs 2>&1
+    $null = Invoke-Git $fetchArgs
 }
 
 Write-Host ''
