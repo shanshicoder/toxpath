@@ -32,18 +32,21 @@ toxpath/
 ├── dataset/
 │   └── toxpath3_dataset.py   # 读 patch + 三分类掩膜，按类别加权采样
 ├── train_3class.py           # 训练入口（单折 / 多折 / 续训）
+├── monitor.py                # 训练监控网页（零依赖，浏览器看曲线 / ETA / GPU）
 ├── inference.py              # checkpoint 加载、前向、Otsu 组织掩膜
 ├── predict_test.py           # 三分类 → 二值肿瘤掩膜，按官方规范出提交 zip
 ├── splits.py                 # 按切片做蛇形分折（切片数自适应）
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
-│   └── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
+│   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
+│   └── run_train.ps1         # 实验室启动器：后台训练 + 日志落盘 + 断远程桌面不中断
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
 ```
 
-`scripts/make_3class_masks.py` 是唯一保留的脚本：`dataset` 与 `splits` 的报错信息
-都指向它，删掉后换数据就没法重新生成三分类标签。其余脚本已移除。
+`scripts/make_3class_masks.py` 是数据准备脚本：`dataset` 与 `splits` 的报错信息
+都指向它，删掉后换数据就没法重新生成三分类标签。`run_train.ps1` 是实验室
+机器的启动入口（见下节）。
 
 ## 环境
 
@@ -115,12 +118,73 @@ python train_3class.py --fold 1 --epochs 24 --resume checkpoints3/fold1/last.pt
 
 ```
 checkpoints3/
-├── splits.json            # 折划分（切片名 → fold），复现与对账用
-├── fold1/best.pt          # dice_fg 最好的那个 epoch
-├── fold1/last.pt          # 续训用
-└── summary.json           # 多折汇总（全折模式）
-logs3/fold1.jsonl          # 逐 epoch 的 loss / dice / acc
+├── splits.json                 # 折划分（切片名 → fold），复现与对账用
+├── fold1/best.pt               # dice_fg 最好的那个 epoch
+├── fold1/last.pt               # 续训用
+└── summary.json                # 多折汇总（全折模式）
+logs3/fold1/live.jsonl          # 每 log_every 步一行 → monitor.py 实时曲线
+logs3/fold1/train_log.json      # 逐 epoch 的 loss / dice / acc
 ```
+
+## 实验室机器：跑起来 + 监控（4090）
+
+### 一次性准备
+
+```powershell
+git clone git@github.com:shanshicoder/toxpath.git D:\work\toxpath   # 或 git pull
+conda create -n toxpath python=3.10 -y ; conda activate toxpath
+pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+pip install timm==1.0.8 numpy Pillow
+```
+
+- **权重（271 MB）**：`git checkout 2ed284a -- scripts/fetch_weights.ps1` 取回下载
+  脚本（自动校验 SHA256），或手动从 GitHub Release 下、U 盘拷到 `weights\`；
+- **数据**：放 `data\toxpath\`，或放别处后设 `TOXPATH_DATA_ROOT`；
+- **冒烟**（约 1 分钟，必须先跑）：
+  `.\scripts\run_train.ps1 -Mode smoke -PythonExe (Get-Command python).Source`
+
+### 正式训练
+
+```powershell
+# 单折（先跑 1 折看曲线）；-PythonExe 填 conda 环境里的 python.exe 全路径
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12 -PythonExe "C:\...\envs\toxpath\python.exe"
+
+# 五折
+.\scripts\run_train.ps1 -Mode all -Epochs 12
+
+# 续训
+.\scripts\run_train.ps1 -Mode resume -Fold 1 -Epochs 20
+```
+
+脚本会把训练**脱离当前窗口**启动（关远程桌面、断 SSH 都不影响），并打印
+PID 与日志路径：
+
+```powershell
+Get-Content logs3\train_fold_*.out.log -Wait -Tail 20   # 实时刷屏
+Get-Process -Id <PID>                                   # 还活着吗
+Stop-Process -Id <PID>                                  # 停止
+```
+
+### 监控网页
+
+另开一个窗口：
+
+```powershell
+python monitor.py            # 默认 http://0.0.0.0:8787，每 5 秒自动刷新
+```
+
+浏览器打开 `http://127.0.0.1:8787`（本机）或 `http://<实验室机器IP>:8787`
+（同一局域网）。显示内容：当前折 / epoch / step 与总进度、速度与 ETA、
+训练 loss 实时曲线、验证 dice_fg 曲线（带 0.835 全空基线虚线）、逐 epoch
+明细表、GPU 型号 / 占用 / 温度。
+
+- 数据源是 `logs3\fold*\live.jsonl`：训练每 `--log-every` 步追加一行，
+  看板轮询读取；训练结束后文件保留，可回看整条曲线；
+- 零第三方依赖、页面不引 CDN，实验室断网也能用；
+- 局域网访问不通时：管理员 PowerShell 执行
+  `netsh advfirewall firewall add rule name="ToxPath Monitor" dir=in action=allow protocol=TCP localport=8787`；
+  跨网段则在本机做转发 `ssh -L 8787:127.0.0.1:8787 用户名@实验室IP`；
+- **没有鉴权**，只当内网工具用，不要暴露到公网；只想本机看就加 `--host 127.0.0.1`。
 
 ## 三分类 → 二值肿瘤掩膜
 

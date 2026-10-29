@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -251,6 +252,71 @@ def _set_bn_eval(model: nn.Module) -> None:
             m.eval()
 
 
+# --------------------------------------------------------------------------- #
+# 实时日志（monitor.py 的看板读这里）
+# --------------------------------------------------------------------------- #
+def _json_safe(value: Any) -> Any:
+    """把 NaN / ±inf 换成 ``None``，递归处理 dict / list。
+
+    Python 的 ``json.dumps`` 默认允许 NaN，写出来是非法 JSON 字面量，
+    浏览器 ``JSON.parse`` 会直接报错。看板宁可显示 "—" 也不能整页崩。
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+class LiveLogger:
+    """把训练进度逐条追加到 JSONL，供 ``monitor.py`` 的网页看板实时读取。
+
+    每写一行立即 flush，进程被 kill 也不会丢掉已写的内容。行格式分三种：
+
+    - ``{"event": "start", ...}`` 折开始时写一次，含 epochs / image_size 等配置，
+      看板靠它算 ETA；
+    - ``{"event": "step", ...}`` 每 ``log_every`` 步写一行，画 loss 曲线用；
+    - ``{"event": "epoch", ...}`` 每个 epoch 验证完写一行，含 val 指标。
+
+    Parameters
+    ----------
+    path:
+        目标文件，通常是 ``logs3/fold{N}/live.jsonl``。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path: Path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # "w" 而不是 "a"：每次重跑该折都从头记，避免看板混入上一次的旧曲线
+        self._fh = path.open("w", encoding="utf-8")
+
+    def write(self, record: dict[str, Any]) -> None:
+        """追加一行 JSON 并立即落盘。
+
+        NaN / inf 一律转成 ``null``：Python 的 ``json`` 默认会写出 ``NaN``
+        这种非法字面量，浏览器那边的 ``JSON.parse`` 会直接抛错。
+        """
+        record.setdefault("ts", round(time.time(), 3))
+        self._fh.write(json.dumps(_json_safe(record), ensure_ascii=False) + "\n")
+        self._fh.flush()
+
+    def close(self) -> None:
+        if not self._fh.closed:
+            self._fh.close()
+
+    def __enter__(self) -> "LiveLogger":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self.close()
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# 单 epoch 训练
+# --------------------------------------------------------------------------- #
 def train_one_epoch(
     model: ToxPathSegmentor,
     loader: DataLoader,
@@ -263,8 +329,14 @@ def train_one_epoch(
     amp: bool,
     freeze_bn: bool,
     log_every: int = 20,
+    live: LiveLogger | None = None,
+    fold: int = 0,
 ) -> dict[str, float]:
-    """跑一个训练 epoch（支持梯度累积与 AMP）。"""
+    """跑一个训练 epoch（支持梯度累积与 AMP）。
+
+    ``live`` 不为空时，每 ``log_every`` 步往 JSONL 追加一行 step 记录，
+    供 ``monitor.py`` 的看板画实时曲线。
+    """
     model.train()
     if freeze_bn:
         _set_bn_eval(model)
@@ -302,6 +374,19 @@ def train_one_epoch(
             print(f"  [epoch {epoch} {i+1}/{n_batches}] "
                   f"loss={losses[-1]:.4f} ce={ces[-1]:.4f} dice={dices[-1]:.4f} "
                   f"({speed:.2f} it/s)")
+            if live is not None:
+                live.write({
+                    "event": "step",
+                    "fold": fold,
+                    "epoch": epoch,
+                    "step": i + 1,
+                    "total": n_batches,
+                    "loss": losses[-1],
+                    "ce": ces[-1],
+                    "dice": dices[-1],
+                    "it_s": round(1.0 / max(speed, 1e-6), 3),
+                    "lr": float(optimizer.param_groups[0]["lr"]),
+                })
 
     return {
         "loss": float(np.mean(losses)) if losses else float("nan"),
@@ -486,12 +571,29 @@ def train_fold(
     fold_log.mkdir(parents=True, exist_ok=True)
     history: list[dict[str, Any]] = []
 
+    # 实时日志：monitor.py 读这个文件画曲线，第一行带配置供看板算 ETA
+    live = LiveLogger(fold_log / "live.jsonl")
+    live.write({
+        "event": "start",
+        "fold": fold,
+        "epochs": args.epochs,
+        "start_epoch": start_epoch,
+        "samples_per_epoch": args.samples_per_epoch,
+        "image_size": args.image_size,
+        "batch_size": args.batch_size,
+        "grad_accum": args.grad_accum,
+        "n_train_slides": len(train_slides),
+        "val_slides": list(val_slides),
+        "init": args.init,
+    })
+
     for epoch in range(start_epoch, args.epochs + 1):
         t_epoch: float = time.time()
         train_stats = train_one_epoch(
             model, train_loader, criterion, optimizer, device,
             epoch=epoch, grad_accum=args.grad_accum, amp=amp,
             freeze_bn=args.freeze_bn, log_every=args.log_every,
+            live=live, fold=fold,
         )
 
         do_val: bool = (epoch % args.val_every == 0) or (epoch == args.epochs)
@@ -518,6 +620,19 @@ def train_fold(
             json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        # 只挑标量指标写进实时日志，逐切片的明细留在 train_log.json
+        live.write({
+            "event": "epoch",
+            "fold": fold,
+            "epoch": epoch,
+            "minutes": round((time.time() - t_epoch) / 60.0, 2),
+            "train_loss": train_stats["loss"],
+            "train_dice_loss": train_stats["dice_loss"],
+            **{k: float(val_stats[k]) for k in
+               ("loss", "dice_c1", "dice_c2", "dice_fg", "iou_fg", "pixel_acc")
+               if k in val_stats},
+        })
+
         if not do_val:
             continue
 
@@ -538,6 +653,9 @@ def train_fold(
     (fold_out / "history.json").write_text(
         json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    live.write({"event": "done", "fold": fold, "best_dice_fg": best_fg,
+                "epochs_done": len(history)})
+    live.close()
     return {
         "fold": fold,
         "val_slides": list(val_slides),
