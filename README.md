@@ -15,12 +15,15 @@ np/hv/tp 三个解码头换成一个 3 类语义头；总参数 114.1 M。
 
 ## 快速开始（实验室 RTX 4090）
 
-```powershell
-# 0) 笔记本上：打包（第一次带权重 → weights\ 会一起塞进包里）
-.\scripts\make_code_package.bat -IncludeWeights   # 代码 + 271 MB 权重，约 250 MB
-.\scripts\make_code_package.bat                    # 之后只同步代码，约 260 KB
+代码走 Git，权重走 GitHub Release（271 MB 超过单文件 100 MB 限制，进不了仓库）。
 
-# 1) 实验室机器：建环境（一次）
+```powershell
+# 0) 实验室机器：拉代码（第一次）+ 下权重
+git clone git@github.com:shanshicoder/toxpath.git D:\work\toxpath
+cd D:\work\toxpath
+scripts\fetch_weights.bat                    # 271 MB → weights\，自动校验 SHA256
+
+# 1) 建环境（一次）
 conda create -n toxpath python=3.10 -y
 conda activate toxpath
 pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
@@ -35,7 +38,9 @@ python scripts\check_env.py --data-root "D:\data\toxpath"
 .\scripts\train_local.bat -Mode all -Epochs 20
 ```
 
-细节（电源设置、远程桌面断开、续训、评测、故障排查）见 `docs/本地训练SOP.md`。
+之后每次改完代码，笔记本上 `scripts\sync_github.bat`，实验室机器 `git pull` 即可。
+细节（首次配 SSH key、权重下载失败重试、电源设置、远程桌面断开、续训、评测、故障排查）
+见 `docs/本地训练SOP.md`。
 
 ## 环境
 
@@ -124,8 +129,8 @@ python train_3class.py --fold 1 --epochs 1 --image-size 224 --max-train-samples 
 5. `<项目根>/../histoplus_cellvit_segmentor_20x.pt`
 6. `E:/project/histoplus_cellvit_segmentor_20x.pt`（笔记本旧位置）
 
-> 用 `make_code_package.bat -IncludeWeights` 打的包，解压后权重就在
-> `<项目根>/weights/` 下，第 3 条直接命中，不用配任何环境变量。
+> 权重不进 Git（271 MB > 100 MB 单文件限制），由 `scripts/fetch_weights.bat`
+> 从 GitHub Release 下到 `<项目根>/weights/`，第 3 条直接命中，不用配环境变量。
 
 | `--init` | 加载内容 |
 |---|---|
@@ -178,7 +183,11 @@ toxpath/
 │   ├── check_env.py          # 环境体检：GPU/torch/timm/数据/权重/磁盘 + 参数推荐
 │   ├── train_local.ps1       # Windows 一键训练（smoke/fold/all/resume，后台运行）
 │   ├── train_local.bat       # 上面脚本的启动器（绕过 .ps1 执行策略限制，推荐用这个）
-│   ├── make_code_package.ps1 # 只打代码（约 250 KB），用于拷到实验室机器
+│   ├── sync_github.ps1       # 提交并推送到 GitHub（含大文件护栏）
+│   ├── sync_github.bat       # 上面脚本的启动器
+│   ├── fetch_weights.ps1     # 从 GitHub Release 下载 271 MB 权重 + SHA256 校验
+│   ├── fetch_weights.bat     # 上面脚本的启动器
+│   ├── make_code_package.ps1 # 离线备用：打包代码（/带权重）走 U 盘
 │   ├── make_code_package.bat # 上面脚本的启动器
 │   └── make_3class_masks.py  # 二值 mask → 彩色三分类 mask
 ├── tests/

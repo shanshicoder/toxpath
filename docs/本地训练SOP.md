@@ -10,9 +10,10 @@
 
 | 环节 | 云端（旧） | 本地（现在） |
 |---|---|---|
-| 代码到位 | tar 打包 → scp 上传 1.5 GB | **代码包 250 KB**（加 `-IncludeWeights` 则约 250 MB）→ U 盘/共享盘 |
-| 数据到位 | 跟包一起传 | 机器上已有，不用动 |
-| 权重到位 | 一起传 | **随代码包一起打**，解压即在 `weights\` 下 |
+| 代码到位 | tar 打包 → scp 上传 1.5 GB | **`git clone`**，仓库几百 KB，秒完成 |
+| 数据到位 | 跟包一起传 | 机器上已有，不用动，`--data-root` 指过去 |
+| 权重到位 | 一起传 | **GitHub Release 附件**（271 MB，超单文件限制），脚本下载 + 校验 |
+| 代码更新 | 重新打包上传 | `git pull`，只传差异 |
 | 路径 | 写死 `/root/autodl-tmp/...` | `paths.py` 自动解析，换机器不改代码 |
 | 环境 | 镜像自带 | 自己建 conda 环境（一次） |
 | 进程存活 | `nohup ... &` | `train_local.bat` 后台进程 + 日志重定向 |
@@ -70,54 +71,139 @@ python -c "import timm; print(timm.__version__)"
 > PowerShell 里 `conda activate` 报「无法识别」时，先执行一次 `conda init powershell`，然后重开窗口。
 > 想开机自动进环境：`conda config --set auto_activate_base false` 之后手动 activate 即可。
 
-### 1.3 把代码和权重放上去
+### 1.3 从 GitHub 拉代码
 
-实验室机器上**没有** HistoPLUS 权重（271 MB），所以第一次上机必须打「完整包」，
-把权重一起带过去；以后只同步代码改动时打「纯代码包」即可。
+代码走 Git，不是拷压缩包。仓库：`git@github.com:shanshicoder/toxpath.git`。
+
+**第一次（实验室机器上）**
+
+```powershell
+git clone git@github.com:shanshicoder/toxpath.git D:\work\toxpath
+cd D:\work\toxpath
+dir
+# 应看到 train_3class.py、evaluate.py、inference.py、paths.py、model\、dataset\、docs\ ...
+```
+
+**以后同步**（笔记本推上去之后）
+
+```powershell
+cd D:\work\toxpath
+git pull
+```
+
+**笔记本这边：改完代码怎么推**
 
 ```powershell
 cd E:\project\toxpath
-
-# ① 第一次上机（代码 + 权重，约 250 MB，压缩约 20 秒）
-scripts\make_code_package.bat -IncludeWeights
-
-# ② 之后只改代码（约 260 KB，1 秒）
-scripts\make_code_package.bat
+scripts\sync_github.bat -Message "fix: 修正 fold5 采样权重"
 ```
 
-| 包 | 命令 | 体积 | 何时用 |
-|---|---|---:|---|
-| 完整包 `toxpath_full_<时间>.zip` | `-IncludeWeights` | ≈250 MB（内含 271 MB 权重） | 第一次拷到新机器 / 机器权重丢了 |
-| 纯代码包 `toxpath_code_<时间>.zip` | 不带参数 | ≈260 KB | 机器上已有权重，只同步代码 |
+不给 `-Message` 也行，会自动写 `sync: <时间> 自动同步`。脚本会先扫描待提交文件，
+拦住误入的 `.pt` / `.jpg` / `data\` / checkpoint（权重 271 MB 推上去会被 GitHub
+直接拒），再 add + commit + push。`-DryRun` 可以只看它打算做什么。
 
-> `.bat` 只是包了一层 `powershell -ExecutionPolicy Bypass`，免得被「禁止运行脚本」拦下。
-> 直接调 `.ps1` 也可以，参数完全相同。
+**实验室机器要先能连 GitHub**
 
-拷到实验室机器后解压到任意目录，例如 `D:\work\toxpath`：
+私有仓库不能匿名 clone，得有一把属于这台机器的 SSH key：
 
 ```powershell
-Expand-Archive D:\transfer\toxpath_full_20261029.zip -DestinationPath D:\work\toxpath
-cd D:\work\toxpath
-dir
-# 应看到 train_3class.py、evaluate.py、inference.py、paths.py、model\、dataset\、weights\
-dir .\weights\
-# histoplus_cellvit_segmentor_20x.pt   271 MB
+ssh-keygen -t ed25519 -C "lab-4090"        # 一路回车，密码可留空
+type $env:USERPROFILE\.ssh\id_ed25519.pub  # 复制整段输出
 ```
 
-**核对权重是否完整**（U 盘拷贝最容易只拷一半）：
+粘到 GitHub → Settings → SSH and GPG keys → New SSH key → 验证：
+
+```powershell
+ssh -T git@github.com
+# 出现 Hi shanshicoder! You've successfully authenticated 即通
+```
+
+> 校园网/公司网常封 22 端口。`ssh -T` 超时就改用 HTTPS：
+> `git clone https://github.com/shanshicoder/toxpath.git D:\work\toxpath`
+> 首次会弹浏览器登录，或用 PAT 当密码。
+
+**仓库里有什么、没什么**
+
+| 进仓库 | 不进仓库（`.gitignore` 挡住） |
+|---|---|
+| 全部 `.py` 源码、`docs\`、`scripts\`、`tests\` | `data\`（1.2 GB patch + mask） |
+| `requirements.txt`、`README.md`、本 SOP | `weights\`（271 MB 权重，走 Release） |
+| `.gitattributes`（统一换行符） | `checkpoints3\`、`logs3\`、`eval3\`（训练产物） |
+
+所以 clone 下来只有几百 KB，几秒钟完成。
+
+> **完全连不上 GitHub 时的兜底**：笔记本上跑 `scripts\make_code_package.bat -IncludeWeights`，
+> 打一个含权重的 zip（约 250 MB），U 盘拷到实验室机器解压即用。
+> 这是应急路径，日常同步还是走 `git pull`——增量只传改动，比每次搬 250 MB 强。
+
+### 1.4 权重：从 GitHub Release 下载
+
+271 MB 的 `histoplus_cellvit_segmentor_20x.pt` 超过 GitHub 单文件 100 MB 硬限制，
+**不能**放进仓库，所以作为 Release 附件单独分发。
+
+> **这个 Release 只需建一次**（仓库所有者操作）：
+> GitHub 仓库页 → Releases → Draft a new release → tag 填 `weights-v1` →
+> 把 `histoplus_cellvit_segmentor_20x.pt` 拖进附件框 → Publish release。
+> 私有仓库的附件同样要登录/带 token 才能下。之后所有机器都用下面的方式拉。
+
+**方式 A：脚本下载（推荐）**
+
+```powershell
+cd D:\work\toxpath
+scripts\fetch_weights.bat
+```
+
+它会下到 `weights\`，支持断点续传，下完自动核对字节数与 SHA256：
+
+```
+[size] 284507558 字节
+[hash] 正在算 SHA256...
+[done] 校验通过，权重就位：D:\work\toxpath\weights\histoplus_cellvit_segmentor_20x.pt
+```
+
+私有仓库要带 token（GitHub → Settings → Developer settings → Personal access
+tokens → 勾 `repo` 权限）：
+
+```powershell
+setx GITHUB_TOKEN "ghp_xxxxxxxx"     # 重开窗口生效
+scripts\fetch_weights.bat
+```
+
+> GitHub 的附件域名（`objects.githubusercontent.com`）在国内经常传到一半被重置。
+> 报 curl 退出码 56 时**直接重跑**，会从断点接着下，一般 2–3 次就能完成。
+
+**方式 B：浏览器手动下载**
+
+打开 `https://github.com/shanshicoder/toxpath/releases/tag/weights-v1`，
+下载 `.pt` 放到 `D:\work\toxpath\weights\`（目录不存在就新建）。
+
+**方式 C：U 盘 / 网盘**
+
+网络实在不通时才用。拷完务必核对哈希，见下。
+
+**核对完整性**（U 盘拷贝最容易只拷一半，只拷 200 MB 也会"看起来成功"）：
 
 ```powershell
 Get-FileHash .\weights\histoplus_cellvit_segmentor_20x.pt -Algorithm SHA256
-# 打包时会打印一行 [sha256]，两边必须完全一致；
-# 本地基准：AA19DC31C109C0A4FCF7BD773559C45480CEE792A331AE0A9FFE42EB08267BFC
+# 基准值，必须完全一致：
+# AA19DC31C109C0A4FCF7BD773559C45480CEE792A331AE0A9FFE42EB08267BFC
 ```
 
-打包脚本会回扫压缩包：除 `weights\` 下那一个 `.pt` 之外，不允许出现任何
-`.pt` / `.jpeg` / `data\`，也不允许出现 checkpoint、日志。
+`paths.py` 会自动在这三个位置找权重，命中第一个就用：
 
-### 1.4 数据与权重就位
+```
+① <项目根>\weights\histoplus_cellvit_segmentor_20x.pt   ← 推荐，脚本就放这里
+② <项目根>\histoplus_cellvit_segmentor_20x.pt
+③ <项目根>\..\histoplus_cellvit_segmentor_20x.pt
+```
 
-数据目录结构（`--data-root` 指向这一层）：
+都不中时 `check_env.py` 会把试过的路径全列出来；也可以显式指定：
+`setx TOXPATH_HISTOPLUS_CKPT "D:\w\histoplus_cellvit_segmentor_20x.pt"`，
+或每次加 `--histoplus-ckpt`。
+
+### 1.5 数据目录
+
+数据**不进仓库**，实验室机器上放哪都行，只要 `--data-root` 指对。目录结构：
 
 ```
 D:\data\toxpath\
@@ -139,28 +225,6 @@ D:\data\toxpath\
 
 > 注意最后一列：**fold5 的验证集（train_005）只有 4 张类别 1**，那一折的 `dice_c1` 可能是 `nan` 或 0，属正常，看 `dice_c2` / `dice_fg` 即可。
 
-权重（271 MB，`histoplus_cellvit_segmentor_20x.pt`）：
-
-- 用 `-IncludeWeights` 打的完整包，解压后就位于 `D:\work\toxpath\weights\`，**不用再动**；
-- 如果是别人单独把 `.pt` 拷给你（U 盘、网盘），手动放进去即可：
-
-```powershell
-mkdir D:\work\toxpath\weights -Force
-copy D:\transfer\histoplus_cellvit_segmentor_20x.pt D:\work\toxpath\weights\
-```
-
-`paths.py` 会自动在下面三个位置找权重，命中第一个就用：
-
-```
-① <项目根>\weights\histoplus_cellvit_segmentor_20x.pt   ← 推荐，完整包就是这个位置
-② <项目根>\histoplus_cellvit_segmentor_20x.pt
-③ <项目根>\..\histoplus_cellvit_segmentor_20x.pt
-```
-
-都找不到时，`check_env.py` 会把试过的路径全列出来；也可以显式指定：
-`setx TOXPATH_HISTOPLUS_CKPT "D:\w\histoplus_cellvit_segmentor_20x.pt"`，
-或每次加 `--histoplus-ckpt`。
-
 数据路径**不用改代码**，按优先级任选一种：
 
 | 方式 | 命令 | 适用 |
@@ -169,9 +233,9 @@ copy D:\transfer\histoplus_cellvit_segmentor_20x.pt D:\work\toxpath\weights\
 | B. 环境变量 | `setx TOXPATH_DATA_ROOT "D:\data\toxpath"`（重开窗口生效） | 长期固定，一次搞定 |
 | C. 放进项目 | 把 `data\toxpath\` 放到 `D:\work\toxpath\data\toxpath\` | 想让项目和数据绑在一起 |
 
-权重同理：`TOXPATH_HISTOPLUS_CKPT` 或 `--histoplus-ckpt`，或直接放 `weights\`。
+推荐 B，设一次以后所有命令都不用带 `--data-root`。
 
-### 1.5 一条命令体检（必做）
+### 1.6 一条命令体检（必做）
 
 ```powershell
 cd D:\work\toxpath
@@ -478,8 +542,12 @@ Compress-Archive -Path .\logs3, .\eval3 -DestinationPath D:\backup\toxpath_logs3
 | DataLoader 卡住 / `BrokenPipeError` | `--num-workers 2`；仍卡就 `0`（慢但稳） |
 | 路径里有中文或空格导致报错 | 项目和数据的上级目录尽量用纯英文；真要带空格，用引号包住整个路径 |
 | 日志里 `data_root` 指向错的地方 | 优先级是 命令行 > 环境变量 > 项目内 `data\toxpath`；显式加 `--data-root` 最保险 |
-| `找不到 HistoPLUS 权重` | 在笔记本上用 `make_code_package.bat -IncludeWeights` 重打完整包；或手动把 `.pt` 放到 `D:\work\toxpath\weights\`；或 `setx TOXPATH_HISTOPLUS_CKPT "..."` |
-| 权重只有几十 MB / `check_env` 提示偏小 | U 盘没拷完，重新拷并核对 SHA256（见 1.3） |
+| `找不到 HistoPLUS 权重` | 跑 `scripts\fetch_weights.bat` 自动下载；或手动把 `.pt` 放到 `D:\work\toxpath\weights\`；或 `setx TOXPATH_HISTOPLUS_CKPT "..."` |
+| 权重只有几十 MB / `check_env` 提示偏小 | 下载或拷贝没完成，重跑 `fetch_weights.bat`（会续传），再核对 SHA256（见 1.4） |
+| `fetch_weights` 报 curl 退出码 56 / 28 | GitHub 附件域名被重置或超时，**直接重跑**，脚本从断点续传；实在不行用浏览器下 |
+| `git clone` 卡住或 `ssh: connect to host github.com port 22` | 校园网封 22 端口，改用 HTTPS：`git clone https://github.com/shanshicoder/toxpath.git` |
+| `git push` 报 `Permission denied (publickey)` | 公钥没加到 GitHub，或私钥带 passphrase 而当前环境不能输入；`ssh -T git@github.com` 先验证 |
+| `git pull` 冲突 | 实验室机器上别改代码，只拉不改；已改就 `git stash` 再 `git pull`，或 `git checkout -- <文件>` 丢弃 |
 | `FileNotFoundError: 三分类 mask 目录` | 这台机器只有原始 mask：`python scripts\make_3class_masks.py --dry-run` 先看分布，再去掉 `--dry-run` 生成 |
 | 训练突然变慢 / 单轮耗时翻倍 | 散热降频（看温度）、或别人在抢 GPU、或磁盘被日志写满 |
 | 远程桌面断了回来发现训练没了 | 用了 `-Foreground`；改后台模式，并按第 2 节关掉睡眠 |
@@ -493,9 +561,10 @@ Compress-Archive -Path .\logs3, .\eval3 -DestinationPath D:\backup\toxpath_logs3
 - [ ] `nvidia-smi` 看到 RTX 4090、24 GB、驱动 ≥ 550，且没有别人占卡
 - [ ] `python -c "import torch; print(torch.cuda.is_available())"` → `True`
 - [ ] `timm == 1.0.8`
+- [ ] `git clone` 成功，`git log --oneline -3` 能看到最新提交
 - [ ] `python scripts\check_env.py` 全 `[OK]`（无 `[FAIL]`）
 - [ ] 数据：patch 4953、三分类 mask 4953、CSV 4953 行
-- [ ] 权重 271 MB 在 `weights\` 下，SHA256 与打包时打印的一致
+- [ ] 权重 271 MB 在 `weights\` 下，SHA256 = `AA19DC31...08267BFC`
 - [ ] 电源设置：插电永不睡眠（`powercfg /change standby-timeout-ac 0`）
 - [ ] 冒烟通过：显存 < 20 GB、loss 有限、路径打印正确
 - [ ] 单折 20 轮曲线正常（`dice_c2` / `dice_fg` 上升）

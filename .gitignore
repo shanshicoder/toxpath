@@ -9,6 +9,8 @@ data/
 *.tif
 *.tiff
 *.svs
+*.jpg
+*.jpeg
 *.npy
 *.npz
 
