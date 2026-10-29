@@ -154,7 +154,19 @@ Write-Host ""
 Write-Host "== checksums ==" -ForegroundColor Cyan
 
 $packages = @($codeTar)
-if ($dataTar) { $packages += $dataTar }
+if ($dataTar) {
+    $packages += $dataTar
+}
+elseif ($CodeOnly) {
+    # Keep the manifest complete: with -CodeOnly the data tar is not rebuilt, but if an
+    # earlier one is still in OutDir its line must stay in SHA256SUMS, otherwise the
+    # server-side check silently drops that file.
+    $stale = Join-Path $OutDir "toxpath_data.tar"
+    if (Test-Path -LiteralPath $stale) {
+        Write-Host "   reusing existing toxpath_data.tar for the checksum list" -ForegroundColor Yellow
+        $packages += $stale
+    }
+}
 
 $sumLines = foreach ($p in $packages) {
     $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()

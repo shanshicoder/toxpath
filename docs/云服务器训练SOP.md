@@ -92,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File scripts\make_upload_package.ps1
 
 | 参数 | 用途 |
 |---|---|
-| `-CodeOnly` | 只重打代码包（改了 `.py` 时用，跳过 1.3 GB 数据） |
+| `-CodeOnly` | 只重打代码包（改了 `.py` 时用，跳过 1.3 GB 数据）。`dist\` 里若已有数据包，会复用它补全 `SHA256SUMS`（多花约 10 秒算哈希），清单不会缺行 |
 | `-WithMasks` | 额外带上 `train_masks/`（只在云上要重造标签时才需要） |
 | `-OutDir D:\dist` | 换输出目录 |
 
