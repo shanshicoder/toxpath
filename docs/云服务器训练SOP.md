@@ -1,7 +1,7 @@
 # ToxPath 云服务器训练 SOP（AutoDL / 恒源云，Linux + 单卡）
 
 > 适用机器：云上按量计费实例（RTX 4090 24 GB 或 A40 / A6000 48 GB），Ubuntu 镜像 + root
-> 适用代码：`7b8df82` 及之后（连通域三分类标签 + TensorBoard 监控）
+> 适用代码：`7b8df82` 及之后（连通域三分类标签 + TensorBoard 监控 + `scripts/make_upload_package.ps1`）
 > 姊妹文档：`docs/本地训练SOP.md`（实验室 Windows 机器）；本文只讲**云上**特有的部分
 
 ---
@@ -62,6 +62,39 @@
 
 以下都在 `ssh -p <端口> root@<host>` 里执行。
 
+### 3.0 本地一次打包（推荐）
+
+在本地 PowerShell 里跑一次，得到「代码包 + 数据包 + 校验清单」三样东西：
+
+```powershell
+cd E:\project\toxpath
+powershell -ExecutionPolicy Bypass -File scripts\make_upload_package.ps1
+```
+
+产物落在 `dist\`（已在 `.gitignore` 里，不会被提交）：
+
+| 文件 | 大小 | 条目 | 内容 |
+|---|---:|---:|---|
+| `toxpath_code.tar.gz` | 98,976 B（96.6 KB） | 30（26 文件 + 4 目录） | `git archive HEAD`，归档根就是仓库根 |
+| `toxpath_data.tar` | 1,306,798,592 B（1.22 GiB） | 9,929（9,907 文件 + 22 目录） | `train_patches/` + `train_masks_classes/` + CSV |
+| `SHA256SUMS` | 171 B | — | 服务器上 `sha256sum -c` 直接校验 |
+| `CHECKSUMS.txt` | 658 B | — | 人读清单：commit、大小、文件数、解压命令 |
+
+脚本内置四项检查，**任何一项不过就中止并报红，不会产出可上传的包**：
+
+1. `patches in tar` = `masks in tar` = 磁盘上的文件数（本次 4953 / 4953 / 4953）
+2. `CSV 行数` = patch 数 + 1（本次 4954，含表头）
+3. 归档内路径为正斜杠（Windows 自带 `tar.exe` 是 bsdtar，已实测不会写出反斜杠文件名）
+4. 生成 SHA256 并写入 `SHA256SUMS`
+
+| 参数 | 用途 |
+|---|---|
+| `-CodeOnly` | 只重打代码包（改了 `.py` 时用，跳过 1.3 GB 数据） |
+| `-WithMasks` | 额外带上 `train_masks/`（只在云上要重造标签时才需要） |
+| `-OutDir D:\dist` | 换输出目录 |
+
+> **不要拿哈希当跨机器的固定值。** 同一份数据用 GNU tar 和 Windows 自带的 bsdtar 打，字节数差 9,728，哈希完全不同。完整性判据是「三个计数相等」+ 上传后用**本次生成**的 `SHA256SUMS` 校验，不是某个写死的哈希。
+
 ### 3.1 目录约定
 
 ```bash
@@ -83,10 +116,13 @@ git log --oneline -1        # 记下 commit，出问题好对账
 私有仓库需要 token：`git clone https://<你的PAT>@github.com/shanshicoder/toxpath.git`。
 
 ```powershell
-# 方式 B：云上连不上 GitHub，本地打包再传（本地 PowerShell 执行）
+# 方式 B：云上连不上 GitHub，用 3.0 打好的包（本地 PowerShell 执行）
 cd E:\project\toxpath
-git archive --format=tar.gz -o toxpath_code.tar.gz HEAD
-scp -P 12345 toxpath_code.tar.gz root@<host>:/root/autodl-tmp/work/
+scp -P 12345 dist\toxpath_code.tar.gz root@<host>:/root/autodl-tmp/work/
+
+# 改了代码？先重打（1 秒，不带数据）
+powershell -ExecutionPolicy Bypass -File scripts\make_upload_package.ps1 -CodeOnly
+# 等价手动命令：git archive --format=tar.gz -o dist\toxpath_code.tar.gz HEAD
 ```
 
 ```bash
@@ -94,6 +130,7 @@ scp -P 12345 toxpath_code.tar.gz root@<host>:/root/autodl-tmp/work/
 cd /root/autodl-tmp/work
 mkdir -p toxpath && tar -xzf toxpath_code.tar.gz -C toxpath
 ls toxpath/train_3class.py                 # 确认解压正确
+ls toxpath/labels.py toxpath/scripts/      # 连通域标签与启动器都在
 ```
 
 ### 3.3 权重（271 MB）
@@ -125,9 +162,10 @@ sha256sum histoplus_cellvit_segmentor_20x.pt
 | `train_labels/`（GeoJSON） | — | — | **不要**，训练不读 |
 
 ```powershell
-# 本地：先打包（JPEG 已压缩，用 tar 不压缩；小文件多，逐个 scp 会慢十倍）
-cd E:\project\toxpath\data\toxpath
-tar -cf toxpath_data.tar train_patches train_masks_classes _patch_labels_3class.csv
+# 本地：用 3.0 打好的包（dist\toxpath_data.tar，1.22 GiB）
+# 等价手动命令（JPEG 已压缩，用 tar 不压缩；小文件多，逐个 scp 会慢十倍）：
+#   cd E:\project\toxpath\data\toxpath
+#   tar -cf ..\..\dist\toxpath_data.tar train_patches train_masks_classes _patch_labels_3class.csv
 # 73 张时这个包约 18 GB，打包本身要十几分钟
 ```
 
@@ -135,14 +173,16 @@ tar -cf toxpath_data.tar train_patches train_masks_classes _patch_labels_3class.
 
 ```powershell
 # 本地（Windows 10+ 自带 rsync 的话；没有就用 WSL，或 WinSCP 拖文件）
-rsync -avP -e "ssh -p 12345" toxpath_data.tar root@<host>:/root/autodl-tmp/work/
+cd E:\project\toxpath
+rsync -avP -e "ssh -p 12345" dist\toxpath_data.tar dist\SHA256SUMS root@<host>:/root/autodl-tmp/work/
 ```
 
-没有 rsync 就用 WinSCP（SFTP，支持断点续传），拖到 `/root/autodl-tmp/work/`。
+没有 rsync 就用 WinSCP（SFTP，支持断点续传），把 `toxpath_data.tar` 和 `SHA256SUMS` 拖到 `/root/autodl-tmp/work/`。
 
 ```bash
-# 服务器：解压 + 校验
+# 服务器：先验哈希，再解压，再数文件
 cd /root/autodl-tmp/work
+sha256sum -c SHA256SUMS                   # 两行都要 OK（code 包也在里面，先传齐再跑）
 mkdir -p toxpath/data/toxpath
 tar -xf toxpath_data.tar -C toxpath/data/toxpath
 rm toxpath_data.tar                       # 解压完就删，省磁盘
@@ -154,6 +194,8 @@ wc -l _patch_labels_3class.csv            # 4954（或 72001，含表头）
 ```
 
 **这三个数字必须对得上**。patch 数与 mask 数不等、或 CSV 行数少了，说明传输截断，重传。
+
+> 只传了数据包、没传代码包时，`sha256sum -c` 会报 `toxpath_code.tar.gz: No such file` —— 这不是损坏，是缺文件。要么补传，要么只用它校验数据包：`sha256sum -c SHA256SUMS --ignore-missing`。
 
 ---
 
@@ -406,6 +448,9 @@ scp -P 12345 root@<host>:/root/autodl-tmp/work/toxpath/results3.tar.gz E:\projec
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| 打包脚本报 `verification failed` | patch 数与 mask 数不等，或 CSV 行数和 patch 数对不上 | 先跑 `make_3class_masks.py` 重建标签；再确认 `data/toxpath` 没缺切片 |
+| 服务器 `sha256sum -c` 报 `FAILED` | 传输截断（rsync 被中断 / 磁盘满） | 重传该包，`rsync -avP` 会续传；**不要解压损坏的包** |
+| `sha256sum -c` 报 `No such file` | 只传了一个包 | 补传另一个，或加 `--ignore-missing` 只校验已有的 |
 | `找不到 patch 索引：_patch_labels_3class.csv` | 数据没解压到 `--data-root` 指定层 | 确认 `--data-root` 指向**含 `train_patches/` 的那一层** |
 | `找不到 HistoPLUS 权重` | 路径不对 / 只传了一半 | 重新 `sha256sum` 校验，284507558 字节 |
 | `timm` 版本不是 1.0.8 | 镜像自带别的版本 | `pip install timm==1.0.8`，装完再验一次 |

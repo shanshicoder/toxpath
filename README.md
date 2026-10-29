@@ -41,9 +41,10 @@ toxpath/
 ├── labels.py                 # 三分类定义：颜色、名称、连通域定类规则（唯一来源）
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
-│   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
-│   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
-│   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
+│   ├── make_3class_masks.py    # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
+│   ├── make_upload_package.ps1 # 打云上传包：代码包 + 数据包 + SHA256SUMS（内含四项校验）
+│   ├── run_train.ps1           # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
+│   └── sync_github.ps1/.bat    # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
 ├── docs/
 │   ├── 本地训练SOP.md        # 实验室 Windows + 4090：准备、训练、TensorBoard、排错
 │   └── 云服务器训练SOP.md    # AutoDL/恒源云：上传数据、后台训练、自动关机、结果回收
@@ -53,7 +54,8 @@ toxpath/
 
 `scripts/make_3class_masks.py` 是数据准备脚本：`dataset` 与 `splits` 的报错信息
 都指向它，删掉后换数据就没法重新生成三分类标签。`run_train.ps1` 是实验室
-机器的启动入口（见下节）。
+机器的启动入口（见下节）；`make_upload_package.ps1` 是上云前的打包入口
+（代码包 + 数据包 + `SHA256SUMS`，见 `docs/云服务器训练SOP.md` 第 3 节）。
 
 ## 环境
 
