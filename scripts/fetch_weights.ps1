@@ -171,9 +171,11 @@ if ($code -ne 0) {
             Write-Host '       私有仓库请设 token：setx GITHUB_TOKEN "ghp_xxx" 后重开窗口' -ForegroundColor Yellow
         }
         6 {  Write-Host '       域名解析失败：检查网络 / 代理' -ForegroundColor Yellow }
-        7 {  Write-Host '       连不上 github.com：校园网或公司网可能限制，挂代理后重试' -ForegroundColor Yellow }
+        7 {  Write-Host '       连不上 github.com:443：该端口可能被封（国内常见），' -ForegroundColor Yellow
+             Write-Host '       挂代理后重跑；或改用浏览器下载（方式 B）；或 U 盘拷（方式 C）' -ForegroundColor Yellow }
         18 { Write-Host '       传输中断（文件下了一部分）：直接重跑本脚本，会从断点续传' -ForegroundColor Yellow }
-        28 { Write-Host '       超时：重跑本脚本，会从断点续传' -ForegroundColor Yellow }
+        28 { Write-Host '       超时：若是 443 被封，脚本无法自行绕过，需代理或浏览器下载；' -ForegroundColor Yellow
+             Write-Host '       否则重跑即可续传' -ForegroundColor Yellow }
         35 { Write-Host '       TLS 握手失败：多半是代理/防火墙拦截，检查代理设置' -ForegroundColor Yellow }
         56 { Write-Host '       连接被重置（TLS close_notify）：GitHub 附件域经常这样，' -ForegroundColor Yellow
              Write-Host '       直接重跑 2-3 次通常能续传完成；一直不行就用浏览器下载' -ForegroundColor Yellow }

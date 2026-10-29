@@ -118,9 +118,25 @@ ssh -T git@github.com
 # 出现 Hi shanshicoder! You've successfully authenticated 即通
 ```
 
-> 校园网/公司网常封 22 端口。`ssh -T` 超时就改用 HTTPS：
-> `git clone https://github.com/shanshicoder/toxpath.git D:\work\toxpath`
-> 首次会弹浏览器登录，或用 PAT 当密码。
+> **连不上时先判断封的是哪个端口**。国内网络常见的是 **443 被封、22 反而通**
+> （本机实测就是这样），所以别想当然换 HTTPS：
+>
+> ```powershell
+> Test-NetConnection github.com -Port 22    # TcpTestSucceeded
+> ```
+>
+> - **22 通** → 直接用 SSH，别折腾 HTTPS
+> - **22 封、443 通** → 让 SSH 改走 443。在 `%USERPROFILE%\.ssh\config` 里加：
+>
+>   ```
+>   Host github.com
+>       HostName ssh.github.com
+>       Port 443
+>       User git
+>   ```
+>
+>   然后 `ssh -T git@github.com` 验证
+> - **两个都封** → 只能挂代理，或走第 1.3 节末尾的 U 盘兜底
 
 **仓库里有什么、没什么**
 
@@ -545,7 +561,8 @@ Compress-Archive -Path .\logs3, .\eval3 -DestinationPath D:\backup\toxpath_logs3
 | `找不到 HistoPLUS 权重` | 跑 `scripts\fetch_weights.bat` 自动下载；或手动把 `.pt` 放到 `D:\work\toxpath\weights\`；或 `setx TOXPATH_HISTOPLUS_CKPT "..."` |
 | 权重只有几十 MB / `check_env` 提示偏小 | 下载或拷贝没完成，重跑 `fetch_weights.bat`（会续传），再核对 SHA256（见 1.4） |
 | `fetch_weights` 报 curl 退出码 56 / 28 | GitHub 附件域名被重置或超时，**直接重跑**，脚本从断点续传；实在不行用浏览器下 |
-| `git clone` 卡住或 `ssh: connect to host github.com port 22` | 校园网封 22 端口，改用 HTTPS：`git clone https://github.com/shanshicoder/toxpath.git` |
+| `ssh -T git@github.com` 超时 / `connect to host github.com port 22` | 22 被封：在 `%USERPROFILE%\.ssh\config` 配 `HostName ssh.github.com` + `Port 443`（见 1.3） |
+| 浏览器也打不开 github.com | 443 被封，只能挂代理；代码可用代理克隆，权重用 U 盘拷（见 1.4 方式 C） |
 | `git push` 报 `Permission denied (publickey)` | 公钥没加到 GitHub，或私钥带 passphrase 而当前环境不能输入；`ssh -T git@github.com` 先验证 |
 | `git pull` 冲突 | 实验室机器上别改代码，只拉不改；已改就 `git stash` 再 `git pull`，或 `git checkout -- <文件>` 丢弃 |
 | `FileNotFoundError: 三分类 mask 目录` | 这台机器只有原始 mask：`python scripts\make_3class_masks.py --dry-run` 先看分布，再去掉 `--dry-run` 生成 |
