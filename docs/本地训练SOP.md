@@ -477,6 +477,7 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 | 训练日志停在某轮、GPU 占用 0 | 睡眠或重启 | 第 2 节设电源策略，`-Mode resume` 续上 |
 | 同折曲线上有两条重叠 | 用了旧事件目录 | 新代码重跑会自动带时间戳后缀；清 `logs3\tb\foldN_*` 里不要的 |
 | 局域网打不开 6006 | 防火墙 | 第 4.1 节的 `netsh` 命令 |
+| 推 GitHub 报 `Failed to connect ... port 443` | 本机到 GitHub 的 443 被挡，或 DNS 落到不可达的 IP（实测 `20.205.243.166` 不通、`140.82.112.3` 通） | 先 `Test-NetConnection github.com -Port 22`：22 通就 `sync_github.bat -Via ssh`；只是某个 IP 不通，管理员 PowerShell 临时往 `C:\Windows\System32\drivers\etc\hosts` 加一行 `140.82.112.3 github.com`，推完删掉；都行不通就开代理。**commit 已在本地，网络恢复后 `sync_github.bat -NoCommit` 即可** |
 
 ---
 
