@@ -16,7 +16,9 @@
 
 > 项目主体是**模型定义 + 训练**；推理（`inference.py`）与二值导出（`predict_test.py`）
 > 保留在仓库里，评测、打包、旧的同步脚本已从工作区移除（仍完整保存在 git 历史里），
-> 需要时见文末「恢复旧文件」。实验室机器上的完整操作步骤见 `docs/本地训练SOP.md`。
+> 需要时见文末「恢复旧文件」。
+> 操作手册按机器分开：实验室 Windows 看 `docs/本地训练SOP.md`，
+> 云服务器（AutoDL / 恒源云）看 `docs/云服务器训练SOP.md`。
 
 ## 目录结构
 
@@ -43,7 +45,8 @@ toxpath/
 │   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
 │   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
 ├── docs/
-│   └── 本地训练SOP.md        # 实验室机器上的完整操作手册（照抄即可）
+│   ├── 本地训练SOP.md        # 实验室 Windows + 4090：准备、训练、TensorBoard、排错
+│   └── 云服务器训练SOP.md    # AutoDL/恒源云：上传数据、后台训练、自动关机、结果回收
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
 ```
