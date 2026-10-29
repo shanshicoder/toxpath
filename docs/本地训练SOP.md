@@ -269,15 +269,94 @@ python scripts\check_env.py --data-root "D:\data\toxpath"
 [OK  ] GPU                  NVIDIA GeForce RTX 4090  24.0 GB  SM 8.9  128 SM
 [OK  ] 显存                  已用 0.5 GB，可用 23.5 GB
 [OK  ] 数据根                 D:\data\toxpath
-[OK  ] train_patches        4953 张
-[OK  ] train_masks_classes  4953 张（与 patch 数一致）
-[OK  ] patch 索引 CSV        4953 行
+[OK  ] train_patches        72000 张 / 73 个切片
+[OK  ] 切片数               73 个（可做 5 折，每折约 14 个验证切片）
+[OK  ] train_masks_classes  72000 张（与 patch 数一致）
+[OK  ] patch 索引 CSV        72000 行
+[OK  ] 类别分布              背景 xxxx (xx.x%)  少量 xx (x.x%)  较多 xxx (xx.x%)
+[INFO] CE 类别权重           当前默认 (0.20, 0.50, 0.30)
 [OK  ] HistoPLUS 权重        271 MB  D:\work\toxpath\weights\...
 [OK  ] 磁盘                  D: 剩余 xxx GB
 ```
 
 出现 `[FAIL]` 就按提示修，退出码非 0 表示还没到能开训的状态。
 `[WARN]` 一般不影响，但会告诉你风险（比如 Python 3.13、显存只剩 8 GB）。
+
+### 1.7 换成全量数据集（5 个切片 → 73 个 WSI）
+
+之前只在 5 个切片上验证过管线，换全量数据要做四件事。**代码不用改**——
+切片数是运行时扫描出来的，折划分也按切片数自动分层。
+
+**① 重新生成三分类 mask 和索引**
+
+```powershell
+cd D:\work\toxpath
+python scripts\make_3class_masks.py --dry-run      # 先看分布，不写文件
+python scripts\make_3class_masks.py                # 确认后生成
+```
+
+它会自动遍历 `train_patches\` 下所有 `train_*` 目录，不用告诉它有几个切片。
+耗时按数据量估算：73 个 WSI 约 7 万张，20–40 分钟。
+
+**② 看新的类别分布，决定要不要改类别权重**
+
+```powershell
+python scripts\check_env.py --data-root "D:\data\toxpath"
+```
+
+重点看 `类别分布` 那一行。当前默认权重 `(0.20, 0.50, 0.30)` 是按「类别 1 只占 3.5%」
+调的，新数据分布不同就要改：
+
+```
+w_c ≈ (1 / 占比_c) 开平方后归一化
+```
+
+例：占 80% / 5% / 15% → `1/r` = 1.25 / 20 / 6.7 → 开方 = 1.12 / 4.47 / 2.59
+→ 归一化 ≈ **0.14 / 0.55 / 0.32**，用它跑第一折，别一上来就调得很激进。
+
+改法：`--class-weights 0.14 0.55 0.32`（命令行）或改 `train_3class.py` 里的
+`DEFAULT_CLASS_WEIGHTS`。
+
+**③ 调大每轮采样数**
+
+```powershell
+python train_3class.py --fold 1 --epochs 20 --batch-size 1 --grad-accum 8 `
+    --samples-per-epoch 3500 --amp --grad-checkpointing
+```
+
+`samples-per-epoch` 默认 800 是给 4953 张调的（每轮看 16%）。7 万张还开 800
+等于每轮只看 1%，训 20 轮也见不到全量。按「每轮覆盖 4–6%」估：
+
+| 总 patch 数 | 建议 samples-per-epoch |
+|---:|---:|
+| ≈ 5,000 | 800 |
+| ≈ 20,000 | 1,200 |
+| ≈ 72,000 | 3,500 |
+
+**④ 先单折，再五折**
+
+```powershell
+python train_3class.py --fold 1 --epochs 20 --batch-size 1 --grad-accum 8 `
+    --samples-per-epoch 3500 --amp --grad-checkpointing
+```
+
+单折跑通、曲线正常再上 `--all-folds`。时间量级（4090，1024 输入）：
+
+| | 5 个切片 | 73 个切片 |
+|---|---:|---:|
+| 单折 20 轮 | 1.5–2 小时 | 7–9 小时 |
+| 5 折 | 约 10 小时 | 约 40 小时 |
+| 磁盘占用 | 1.2 GB | 约 17 GB |
+
+**关于折划分**
+
+第一次训练时会把划分写进 `checkpoints3\splits.json`，评测直接复用，保证两边
+验的是同一批切片。73 个切片 → 5 折时每折 14–15 个切片，按切片级肿瘤负荷
+蛇形分配，各折负荷差控制在 20% 以内（实测 73 个切片的模拟数据差 17%）。
+
+> 旧版代码训出来的 checkpoint 没有 `splits.json`，而且旧版折序（fold1→train_001…）
+> 和新规则顺序不同。用新代码评测旧 checkpoint 会警告，需要加 `--slide train_001`
+> 指定切片，或者干脆重训。
 
 ---
 

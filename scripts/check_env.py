@@ -34,6 +34,7 @@ GBK 控制台打印 ``✓`` 时抛 ``UnicodeEncodeError``。
 from __future__ import annotations
 
 import argparse
+import csv
 import shutil
 import subprocess
 import sys
@@ -58,14 +59,12 @@ from paths import (  # noqa: E402
 # --------------------------------------------------------------------------- #
 # 期望值（与 train_3class.py / requirements.txt 保持一致）
 # --------------------------------------------------------------------------- #
-EXPECT_PATCHES: int = 4953
-"""train_patches 里应有的 patch 数量（本地实测）。"""
+EXPECT_MIN_FOLDS: int = 5
+"""建议的交叉验证折数。
 
-EXPECT_MASKS: int = 4953
-"""train_masks_classes 里应有三分类 mask 数量。"""
-
-EXPECT_CSV_ROWS: int = 4954
-"""_patch_labels_3class.csv 行数（含表头）。"""
+切片数少于它时 ``splits.build_slide_folds`` 会自动降低折数，
+这里只做提示，不作为 FAIL。
+"""
 
 EXPECT_TIMM: str = "1.0.8"
 """HistoPLUS 钉死的 timm 版本。"""
@@ -262,13 +261,25 @@ def check_data(rep: Report, data_root: Path | None) -> None:
                    if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff"})
 
     n_patch: int = _count_files(patches)
+    n_slide: int = (sum(1 for p in patches.iterdir() if p.is_dir())
+                    if patches.is_dir() else 0)
+
     if n_patch < 0:
         rep.add("train_patches", "FAIL", "目录不存在", f"{patches}")
-    elif n_patch == EXPECT_PATCHES:
-        rep.add("train_patches", "OK", f"{n_patch} 张")
+    elif n_patch == 0:
+        rep.add("train_patches", "FAIL", "目录是空的", f"{patches}")
     else:
-        rep.add("train_patches", "WARN", f"{n_patch} 张（本地基准 {EXPECT_PATCHES}）",
-                "数量不同不一定是错，确认这批数据就是你要训的那批")
+        # 不再和固定数字比：数据集换成 73 个 WSI 后 4953 就不再是基准
+        rep.add("train_patches", "OK", f"{n_patch} 张 / {n_slide} 个切片")
+
+    if n_slide > 0:
+        if n_slide >= EXPECT_MIN_FOLDS:
+            rep.add("切片数", "OK",
+                    f"{n_slide} 个（可做 {EXPECT_MIN_FOLDS} 折，每折约 "
+                    f"{n_slide // EXPECT_MIN_FOLDS} 个验证切片）")
+        else:
+            rep.add("切片数", "WARN", f"{n_slide} 个，少于 {EXPECT_MIN_FOLDS}",
+                    "折数会自动降到切片数，每折只有 1 个验证切片，指标波动会很大")
 
     n_mask: int = _count_files(masks)
     if n_mask < 0:
@@ -281,12 +292,35 @@ def check_data(rep: Report, data_root: Path | None) -> None:
                 "mask 与 patch 数量必须一一对应，缺的用 make_3class_masks.py 重新生成")
 
     if csv_path.is_file():
-        n_rows: int = sum(1 for _ in csv_path.open("r", encoding="utf-8")) - 1
+        n_rows: int = 0
+        counts: dict[str, int] = {"0": 0, "1": 0, "2": 0}
+        with csv_path.open("r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                n_rows += 1
+                lab: str | None = row.get("label")
+                if lab in counts:
+                    counts[lab] += 1
+
         if n_rows == max(n_patch, 0):
             rep.add("patch 索引 CSV", "OK", f"{n_rows} 行")
         else:
             rep.add("patch 索引 CSV", "WARN", f"{n_rows} 行，patch {max(n_patch, 0)} 张",
                     "索引与数据不一致时采样权重会偏差；建议重跑 make_3class_masks.py")
+
+        if n_rows > 0:
+            share = {k: v / n_rows for k, v in counts.items()}
+            detail: str = (f"背景 {counts['0']} ({share['0']:.1%})  "
+                           f"少量 {counts['1']} ({share['1']:.1%})  "
+                           f"较多 {counts['2']} ({share['2']:.1%})")
+            # 类别 1 太稀缺会导致该类的 dice 波动大；换数据集后务必看这一行
+            if share["1"] < 0.005 or share["2"] < 0.01:
+                rep.add("类别分布", "WARN", detail,
+                        "某个类别不到 1%，dice 会很不稳；考虑放宽 make_3class_masks 的阈值")
+            else:
+                rep.add("类别分布", "OK", detail)
+            rep.add("CE 类别权重", "INFO",
+                    "当前默认 (0.20, 0.50, 0.30)",
+                    "换成新数据集后按上面的占比重估：越稀缺的类给越大权重")
     else:
         rep.add("patch 索引 CSV", "FAIL", "文件不存在", str(csv_path))
 

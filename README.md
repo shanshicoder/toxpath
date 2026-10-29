@@ -64,6 +64,11 @@ python scripts\check_env.py --data-root "D:\data\toxpath"
 
 ## 数据
 
+> 下面是**本地子集**（5 个切片，笔记本放得下）。实验室机器上是全量 **73 个 WSI**，
+> 目录结构完全相同。代码不假设切片数：训练时扫描 `train_patches/` 下所有目录，
+> 折划分按切片数自动分层（`splits.py`），换数据集不用改代码。
+> 具体步骤见 `docs/本地训练SOP.md` 第 1.7 节。
+
 ```
 data/toxpath/
 ├── train_images/      5 张金字塔 TIFF（L0 8.6万~10万 px）
@@ -96,10 +101,16 @@ python scripts/make_3class_masks.py             # 写 train_masks_classes/
 ```powershell
 .\scripts\train_local.bat -Mode smoke                 # 冒烟：1 epoch / 32 样本，约 5 分钟
 .\scripts\train_local.bat -Mode fold -Fold 1 -Epochs 20   # 单折
-.\scripts\train_local.bat -Mode all -Epochs 20            # 5 折，约 8~10 小时
+.\scripts\train_local.bat -Mode all -Epochs 20            # 全部折（5 个切片时约 8~10 小时）
 .\scripts\train_local.bat -Mode resume -Fold 1            # 从 last.pt 续训
 .\scripts\train_local.bat -Mode all -DryRun               # 只打印命令，不启动
 ```
+
+折数由切片数决定（默认 5 折，切片不足时自动降低），可用 `--num-folds` 覆盖。
+每折训练时会把划分写到 `checkpoints3/splits.json`，评测直接复用，保证两边验的是同一批切片。
+
+> 换全量 73 个 WSI 后，`--samples-per-epoch` 要从 800 调到 3500 左右，
+> 否则每轮只看 1% 的数据。详见 SOP 1.7。
 
 直接调 Python（等价写法）：
 
@@ -196,6 +207,7 @@ toxpath/
 ├── docs/
 │   └── 本地训练SOP.md        # Windows + 4090 全流程（电源设置、续训、故障排查）
 ├── paths.py                  # 数据根/权重统一解析（命令行>环境变量>项目内>历史）
+├── splits.py                 # 切片发现 + 按肿瘤负荷分层分折（自适应切片数）
 ├── inference.py              # 推理：彩色预测图 / 三联对比图 / Otsu 组织掩膜
 ├── evaluate.py               # 正式评测：整图 + 组织区域 + patch 分级，5 折汇总
 └── train_3class.py           # 5 折训练脚本（AMP + 梯度累积）

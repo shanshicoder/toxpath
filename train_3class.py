@@ -75,6 +75,13 @@ from paths import (  # noqa: E402
     resolve_data_root,
     resolve_histoplus_ckpt,
 )
+from splits import (  # noqa: E402
+    build_slide_folds,
+    discover_slides,
+    load_slide_stats,
+    save_folds,
+    validate_folds,
+)
 
 # --------------------------------------------------------------------------- #
 # 默认配置
@@ -84,13 +91,15 @@ from paths import (  # noqa: E402
 DEFAULT_OUT_DIR: Path = PROJECT_ROOT / "checkpoints3"
 DEFAULT_LOG_DIR: Path = PROJECT_ROOT / "logs3"
 
-ALL_SLIDES: list[str] = ["train_001", "train_002", "train_003", "train_004", "train_005"]
-FOLD_VAL_MAP: dict[int, str] = {i + 1: s for i, s in enumerate(ALL_SLIDES)}
+DEFAULT_NUM_FOLDS: int = 5
+"""默认折数。切片数少于它时会在 ``splits.build_slide_folds`` 里自动降低。"""
 
 DEFAULT_CLASS_WEIGHTS: tuple[float, float, float] = (0.20, 0.50, 0.30)
 """CE 类别权重 (背景, 少量肿瘤, 较多肿瘤)。
 
-类别 1 只有 172 张 patch（3.5%），是三类里最稀缺的，给最高权重。
+当前值是按 5 个切片（4953 patch，类别 1 占 3.5%）调的。换成 73 个 WSI 后
+类别分布必然变化，跑 ``scripts/check_env.py`` 或 ``make_3class_masks.py --dry-run``
+看到新分布后，按 ``背景:少量:较多 ≈ (1/占比) 归一化`` 重新估一遍再改。
 """
 
 
@@ -371,11 +380,23 @@ def train_fold(
     device: torch.device,
     *,
     amp: bool,
+    train_slides: list[str],
+    val_slides: list[str],
 ) -> dict[str, Any]:
-    """训练并验证一折。"""
-    val_slide: str = FOLD_VAL_MAP[fold]
-    train_slides: list[str] = [s for s in ALL_SLIDES if s != val_slide]
-    print(f"\n{'='*72}\n[Fold {fold}] val={val_slide} train={train_slides}\n{'='*72}")
+    """训练并验证一折。
+
+    Args:
+        fold: 折号（从 1 开始）。
+        args: 命令行参数。
+        device: 训练设备。
+        amp: 是否启用混合精度。
+        train_slides: 本折训练切片。
+        val_slides: 本折验证切片（切片数 ≥ 6 时可含多个）。
+    """
+    val_desc: str = (", ".join(val_slides) if len(val_slides) <= 6
+                     else f"{len(val_slides)} 个切片")
+    print(f"\n{'=' * 72}\n[Fold {fold}] val={val_desc}  "
+          f"train={len(train_slides)} 个切片\n{'=' * 72}")
 
     # ---- 1) 数据 ----
     cfg_ds = Dataset3Config(
@@ -383,7 +404,7 @@ def train_fold(
         augment=True,
     )
     train_ds, val_ds = build_dataset3(
-        args.data_root, train_slides, [val_slide],
+        args.data_root, train_slides, val_slides,
         cfg=cfg_ds, seed=args.seed,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
@@ -518,7 +539,8 @@ def train_fold(
     )
     return {
         "fold": fold,
-        "val_slide": val_slide,
+        "val_slides": list(val_slides),
+        "n_train_slides": len(train_slides),
         "best_dice_fg": best_fg,
         "last_dice_fg": history[-1].get("dice_fg", float("nan")) if history else float("nan"),
         "last_dice_c1": history[-1].get("dice_c1", float("nan")) if history else float("nan"),
@@ -536,7 +558,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--data-root", type=Path, default=None,
                    help="数据根（含 train_patches/）；不填则按 paths.py 的优先级自动解析")
-    p.add_argument("--fold", type=int, default=1, choices=[1, 2, 3, 4, 5])
+    p.add_argument("--fold", type=int, default=1,
+                   help="训练第几折（1..实际折数）；实际折数由切片数与 --num-folds 决定")
+    p.add_argument("--num-folds", type=int, default=DEFAULT_NUM_FOLDS,
+                   help="交叉验证折数；切片数少于它时自动降到切片数")
     p.add_argument("--all-folds", action="store_true")
 
     # 训练规模
@@ -616,22 +641,48 @@ def main(argv: list[str] | None = None) -> int:
     print(describe_paths(args.data_root, args.histoplus_ckpt))
     print(f"[main] image_size={args.image_size}  batch={args.batch_size}  accum={args.grad_accum}")
 
-    folds: list[int] = list(range(1, 6)) if args.all_folds else [args.fold]
+    # ---- 折划分：运行时扫描切片，按肿瘤负荷分层 ----
+    try:
+        slides: list[str] = discover_slides(args.data_root)
+        stats = load_slide_stats(args.data_root, slides)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[error] {exc}")
+        return 1
+
+    fold_map: dict[int, list[str]] = build_slide_folds(stats, args.num_folds)
+    validate_folds(fold_map, slides)
+    num_folds: int = len(fold_map)
+    splits_path: Path = save_folds(fold_map, args.out_dir)
+    print(f"[main] 折划分已写入 {splits_path}（评测会复用它，保证两边一致）")
+
+    if args.all_folds:
+        folds: list[int] = list(range(1, num_folds + 1))
+    else:
+        if not 1 <= args.fold <= num_folds:
+            print(f"[error] --fold 必须在 1..{num_folds} 之间，当前给的是 {args.fold}")
+            return 1
+        folds = [args.fold]
+
     if args.all_folds and args.resume is not None:
         print("[warn] --all-folds 模式下忽略 --resume（resume 只对单折有意义）")
         args.resume = None
     results: list[dict[str, Any]] = []
     for fold in folds:
+        val_slides: list[str] = fold_map[fold]
+        val_set: set[str] = set(val_slides)
+        train_slides: list[str] = [s for s in slides if s not in val_set]
         results.append(train_fold(
             fold, args, device, amp=amp,
+            train_slides=train_slides, val_slides=val_slides,
         ))
 
     print("\n" + "=" * 72)
-    print("[汇总] 5 折交叉验证")
+    print(f"[汇总] {len(results)} 折交叉验证")
     print("=" * 72)
-    print(f"{'Fold':<6}{'val_slide':<14}{'best_dice_fg':>14}{'dice_c1':>10}{'dice_c2':>10}")
+    print(f"{'Fold':<6}{'n_val':>6}{'n_train':>8}{'best_dice_fg':>14}"
+          f"{'dice_c1':>10}{'dice_c2':>10}")
     for r in results:
-        print(f"{r['fold']:<6}{r['val_slide']:<14}"
+        print(f"{r['fold']:<6}{len(r['val_slides']):>6}{r['n_train_slides']:>8}"
               f"{r['best_dice_fg']:>14.4f}{r['last_dice_c1']:>10.4f}{r['last_dice_c2']:>10.4f}")
     if results:
         vals = [r["best_dice_fg"] for r in results if not np.isnan(r["best_dice_fg"])]

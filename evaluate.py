@@ -63,9 +63,15 @@ from inference import (  # noqa: E402
     tissue_mask_from_rgb,
 )
 from paths import describe_paths, resolve_data_root  # noqa: E402
+from splits import (  # noqa: E402
+    SPLITS_NAME,
+    build_slide_folds,
+    discover_slides,
+    load_folds,
+    load_slide_stats,
+)
 from train_3class import (  # noqa: E402
-    ALL_SLIDES,
-    FOLD_VAL_MAP,
+    DEFAULT_NUM_FOLDS,
     _empty_conf,
     metrics_from_conf,
 )
@@ -100,22 +106,27 @@ def evaluate_fold(
     *,
     data_root: Path,
     device: torch.device,
+    val_slides: list[str],
     image_size: int = 1024,
     max_samples: int = 0,
     overlay_every: int = 40,
     out_dir: Path,
-    slide: str | None = None,
     batch_size: int = 1,
     num_workers: int = 0,
 ) -> dict[str, Any]:
-    """评测一折，落盘 metrics.json / per_patch.csv / 对比图，返回指标 dict。"""
-    val_slide: str = slide or FOLD_VAL_MAP[fold]
-    print(f"\n{'=' * 72}\n[Eval fold {fold}] ckpt={ckpt_path.name} val={val_slide}\n{'=' * 72}")
+    """评测一折，落盘 metrics.json / per_patch.csv / 对比图，返回指标 dict。
+
+    Args:
+        val_slides: 本折的验证切片列表（切片多时一折会有十几个）。
+    """
+    val_desc: str = (", ".join(val_slides) if len(val_slides) <= 6
+                     else f"{len(val_slides)} 个切片")
+    print(f"\n{'=' * 72}\n[Eval fold {fold}] ckpt={ckpt_path.name} val={val_desc}\n{'=' * 72}")
 
     model, meta = load_checkpoint_model(ckpt_path, device, image_size=image_size)
 
     ds = ToxPath3Dataset(
-        data_root, [val_slide],
+        data_root, val_slides,
         cfg=None, mode="val", max_samples=max_samples,
     )
     ds.cfg = type(ds.cfg)(
@@ -223,7 +234,7 @@ def evaluate_fold(
 
     result: dict[str, Any] = {
         "fold": fold,
-        "val_slide": val_slide,
+        "val_slides": list(val_slides),
         "ckpt": str(ckpt_path),
         "ckpt_epoch": meta["epoch"],
         "n_patches": len(rows),
@@ -290,13 +301,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="ToxPath 三分类正式评测（像素级整图/组织 + patch 级分级）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--fold", type=int, choices=[1, 2, 3, 4, 5])
+    p.add_argument("--fold", type=int, help="评测第几折（1..实际折数）")
     p.add_argument("--all-folds", action="store_true")
+    p.add_argument("--num-folds", type=int, default=DEFAULT_NUM_FOLDS,
+                   help="找不到训练时的 splits.json 时，按这个折数重新划分")
     p.add_argument("--ckpt", type=Path, help="单折 checkpoint（--fold 用）")
     p.add_argument("--ckpt-dir", type=Path, default=PROJECT_ROOT / "checkpoints3",
-                   help="含 foldN/best.pt 的目录（--all-folds 用）")
+                   help="含 foldN/best.pt 与 splits.json 的目录（--all-folds 用）")
     p.add_argument("--slide", type=str, default=None,
-                   help="覆盖验证切片（默认按 FOLD_VAL_MAP）")
+                   help="只评测指定切片，覆盖折划分（调试用）")
     p.add_argument("--data-root", type=Path, default=None,
                    help="数据根（含 train_patches/）；不填则按 paths.py 的优先级自动解析")
     p.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "eval3")
@@ -311,6 +324,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def resolve_fold_map(args: argparse.Namespace) -> dict[int, list[str]]:
+    """取得折划分：优先复用训练时落盘的 ``splits.json``，没有就现算。
+
+    复用是为了防止「训练时的验证集」和「评测时的验证集」不一致——
+    数据目录加了几张切片、CSV 重算过，规则现算出来的折就会变，
+    那样评出来的指标和训练日志对不上。
+
+    Raises:
+        FileNotFoundError / ValueError: 数据目录或索引不完整。
+    """
+    path: Path = args.ckpt_dir / SPLITS_NAME
+    loaded: dict[int, list[str]] | None = load_folds(path)
+    if loaded:
+        print(f"[eval] 复用训练时的折划分：{path}")
+        return loaded
+
+    slides: list[str] = discover_slides(args.data_root)
+    stats = load_slide_stats(args.data_root, slides)
+    print(f"[eval] 没找到 {path}，按相同规则重新划分"
+          f"（数据没变的话结果与训练一致）")
+    if args.ckpt_dir.is_dir() and any(args.ckpt_dir.glob("fold*/best.pt")):
+        print("[warn] 该目录里已有 checkpoint 但没有 splits.json，说明是旧版代码训的。")
+        print("       旧版折划分与新规则顺序不同，评测可能用错验证集；")
+        print("       请用 --slide 指定切片，或重新训练以生成 splits.json。")
+    return build_slide_folds(stats, args.num_folds)
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     try:
@@ -322,19 +362,27 @@ def main(argv: list[str] | None = None) -> None:
     print("[evaluate] 路径：")
     print(describe_paths(args.data_root))
 
+    # 手写 --slide 时不需要折划分；否则必须有，才能知道每折验哪些切片
+    fold_map: dict[int, list[str]] = {}
+    if not args.slide:
+        try:
+            fold_map = resolve_fold_map(args)
+        except (FileNotFoundError, ValueError) as exc:
+            raise SystemExit(f"[error] {exc}") from exc
+
     if args.all_folds:
         results: list[dict[str, Any]] = []
-        for fold in range(1, len(ALL_SLIDES) + 1):
+        for fold in sorted(fold_map):
             ckpt: Path = args.ckpt_dir / f"fold{fold}" / "best.pt"
             if not ckpt.is_file():
                 print(f"[skip] fold{fold} 没有 {ckpt}")
                 continue
             results.append(evaluate_fold(
                 fold, ckpt, data_root=args.data_root, device=device,
+                val_slides=fold_map[fold],
                 image_size=args.image_size, max_samples=args.max_samples,
                 overlay_every=args.overlay_every, out_dir=args.out_dir,
-                slide=args.slide, batch_size=args.batch_size,
-                num_workers=args.num_workers,
+                batch_size=args.batch_size, num_workers=args.num_workers,
             ))
         if results:
             summarize(results, args.out_dir)
@@ -343,12 +391,18 @@ def main(argv: list[str] | None = None) -> None:
     else:
         if args.fold is None or args.ckpt is None:
             raise SystemExit("单折评测需要 --fold N --ckpt path/to/best.pt")
+        val_slides: list[str] | None = [args.slide] if args.slide else fold_map.get(args.fold)
+        if not val_slides:
+            raise SystemExit(
+                f"[error] fold{args.fold} 不在折划分里"
+                f"（现有折：{sorted(fold_map)}），或用 --slide 指定切片"
+            )
         evaluate_fold(
             args.fold, args.ckpt, data_root=args.data_root, device=device,
+            val_slides=val_slides,
             image_size=args.image_size, max_samples=args.max_samples,
             overlay_every=args.overlay_every, out_dir=args.out_dir,
-            slide=args.slide, batch_size=args.batch_size,
-            num_workers=args.num_workers,
+            batch_size=args.batch_size, num_workers=args.num_workers,
         )
 
 
