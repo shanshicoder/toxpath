@@ -15,7 +15,7 @@
 
 运行方式
 --------
-在项目根目录 ``E:/project/toxpath`` 下::
+在项目根目录下（例如笔记本的 ``E:/project/toxpath``、实验室的 ``D:/work/toxpath``）::
 
     conda activate toxpath
     python tests/test_model_forward.py

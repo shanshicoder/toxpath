@@ -49,7 +49,15 @@ from dataset import (  # noqa: E402
     seed_worker,
 )
 
-DATA_ROOT: Path = PROJECT_ROOT / "data" / "toxpath"
+from paths import resolve_data_root  # noqa: E402
+
+# 数据根按 paths.py 解析（命令行参数不适用于测试，所以这里靠环境变量
+# TOXPATH_DATA_ROOT 或「项目内 data/toxpath」布局）；都找不到就退回旧布局，
+# 相关用例会自动 skip 而不是报错。
+try:
+    DATA_ROOT: Path = resolve_data_root()
+except FileNotFoundError:
+    DATA_ROOT = PROJECT_ROOT / "data" / "toxpath"
 MASK_ROOT: Path = DATA_ROOT / "train_masks_classes"
 INDEX_PATH: Path = DATA_ROOT / "_patch_labels_3class.csv"
 HAS_DATA: bool = (

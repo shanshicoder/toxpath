@@ -39,6 +39,10 @@ from typing import NamedTuple
 import numpy as np
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from paths import describe_paths, resolve_data_root  # noqa: E402
+
 # --------------------------------------------------------------------------- #
 # 常量
 # --------------------------------------------------------------------------- #
@@ -55,7 +59,6 @@ CLASS_NAMES: dict[int, str] = {
     2: "较多肿瘤（≥5%）",
 }
 
-DEFAULT_DATA_ROOT: Path = Path("E:/project/toxpath/data/toxpath")
 DEFAULT_OUT_ROOT: Path = Path("train_masks_classes")
 DEFAULT_INDEX_NAME: str = "_patch_labels_3class.csv"
 
@@ -234,8 +237,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="把二值 mask 转成三分类彩色 mask（0 背景 / 1 少肿瘤 / 2 多肿瘤）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT,
-                   help="数据根目录（其下有 train_masks/）")
+    p.add_argument("--data-root", type=Path, default=None,
+                   help="数据根目录（其下有 train_masks/）；不填则按 paths.py 自动解析")
     p.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT,
                    help="输出目录；相对路径时拼到 --data-root 下")
     p.add_argument("--low", type=float, default=0.0001, help="标签 1 下界（前景占比）")
@@ -248,6 +251,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args: argparse.Namespace = parse_args(argv)
+    try:
+        args.data_root = resolve_data_root(args.data_root)
+    except FileNotFoundError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 2
+    print("[make3] 路径：")
+    print(describe_paths(args.data_root))
     cfg: EdgeConfig = EdgeConfig(low=args.low, high=args.high,
                                  binary_thresh=args.binary_thresh)
     return run(args.data_root, args.out_root, cfg,

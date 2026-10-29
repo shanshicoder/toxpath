@@ -20,7 +20,8 @@
 
 预训练权重
 ----------
-``E:/project/histoplus_cellvit_segmentor_20x.pt`` 里的参数可以分三部分加载：
+``histoplus_cellvit_segmentor_20x.pt`` 里的参数可以分三部分加载（权重路径由
+:mod:`paths` 解析，默认在 ``<项目根>/weights/`` 下找）：
 
 - ``encoder``：H0-mini（173 个张量，严格匹配）；
 - ``neck``：四路 Neck（68 个张量，严格匹配）；
@@ -35,7 +36,7 @@
     python train_3class.py --fold 1 --epochs 1 --image-size 224 --batch-size 1 \\
         --max-train-samples 4 --max-val-samples 2 --device cpu --no-amp
 
-    # 4090D 正式训练（1024 输入，梯度累积 8）
+    # 实验室 4090 正式训练（1024 输入，梯度累积 8）
     python train_3class.py --fold 1 --epochs 12 --batch-size 1 --grad-accum 8 \\
         --samples-per-epoch 800 --amp --grad-checkpointing
 
@@ -69,12 +70,17 @@ from dataset import (  # noqa: E402
 )
 from model import ToxPathConfig, ToxPathSegmentor  # noqa: E402
 from model.losses import DiceCrossEntropyLoss  # noqa: E402
+from paths import (  # noqa: E402
+    describe_paths,
+    resolve_data_root,
+    resolve_histoplus_ckpt,
+)
 
 # --------------------------------------------------------------------------- #
 # 默认配置
 # --------------------------------------------------------------------------- #
-DEFAULT_DATA_ROOT: Path = Path("E:/project/toxpath/data/toxpath")
-DEFAULT_HISTOPLUS_CKPT: Path = Path("E:/project/histoplus_cellvit_segmentor_20x.pt")
+# 数据根与预训练权重不写死盘符：统一由 paths.py 按「命令行 > 环境变量 >
+# 项目内相对路径 > 历史绝对路径」的顺序解析，换机器不用改代码。
 DEFAULT_OUT_DIR: Path = PROJECT_ROOT / "checkpoints3"
 DEFAULT_LOG_DIR: Path = PROJECT_ROOT / "logs3"
 
@@ -528,7 +534,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="ToxPath 三分类训练（1024 输入，HistoPLUS 架构）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
+    p.add_argument("--data-root", type=Path, default=None,
+                   help="数据根（含 train_patches/）；不填则按 paths.py 的优先级自动解析")
     p.add_argument("--fold", type=int, default=1, choices=[1, 2, 3, 4, 5])
     p.add_argument("--all-folds", action="store_true")
 
@@ -558,7 +565,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--image-size", type=int, default=1024)
     p.add_argument("--init", choices=["none", "encoder", "encoder+neck", "full"],
                    default="encoder+neck", help="HistoPLUS 权重加载范围")
-    p.add_argument("--histoplus-ckpt", type=Path, default=DEFAULT_HISTOPLUS_CKPT)
+    p.add_argument("--histoplus-ckpt", type=Path, default=None,
+                   help="HistoPLUS 权重路径；不填则按 paths.py 的优先级自动解析")
     p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                    help="cuda 上用 bfloat16 自动混合精度")
 
@@ -581,6 +589,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     set_seed(args.seed)
 
+    # ---- 0) 路径解析（换机器不用改代码：命令行 > 环境变量 > 项目内 > 历史路径）
+    try:
+        args.data_root = resolve_data_root(args.data_root)
+        args.histoplus_ckpt = (
+            resolve_histoplus_ckpt(args.histoplus_ckpt)
+            if args.init != "none" else None
+        )
+    except FileNotFoundError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 2
+
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -590,7 +609,11 @@ def main(argv: list[str] | None = None) -> int:
         torch.backends.cudnn.benchmark = True
 
     print(f"[main] device={device}  amp={amp}")
-    print(f"[main] data_root={args.data_root}")
+    if device.type == "cuda":
+        props = torch.cuda.get_device_properties(0)
+        print(f"[main] gpu={props.name}  vram={props.total_memory / 1024**3:.1f} GB")
+    print("[main] 路径：")
+    print(describe_paths(args.data_root, args.histoplus_ckpt))
     print(f"[main] image_size={args.image_size}  batch={args.batch_size}  accum={args.grad_accum}")
 
     folds: list[int] = list(range(1, 6)) if args.all_folds else [args.fold]
