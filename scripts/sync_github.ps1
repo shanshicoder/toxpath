@@ -63,7 +63,18 @@ function Invoke-Git {
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & git @GitArgs
+        # 2>&1 把 stderr 一起收下再按普通文本打印，两个目的：
+        #   1) PS 5.1 不会因为 git 往 stderr 写进度就抛 NativeCommandError；
+        #   2) 不让 git 的输出混进函数返回值（否则 $pushCode 会变成一串文字）。
+        $out = & git @GitArgs 2>&1
+        foreach ($line in $out) {
+            if ($line -is [System.Management.Automation.ErrorRecord]) {
+                Write-Host $line.Exception.Message
+            }
+            else {
+                Write-Host $line
+            }
+        }
         return $LASTEXITCODE
     }
     finally {
@@ -288,7 +299,14 @@ else {
     Write-Host '       若提示 Enter passphrase：输入 SSH 私钥密码（输入时不显示）' -ForegroundColor DarkGray
 }
 
-$pushArgs = $proxyArgs + @('push', '-u', $pushUrl, $branch)
+if ($useHttps) {
+    # 不要 -u：推到 URL 时 -u 会把 upstream 设成 "https://…/main" 这种 URL 远程，
+    # 之后 git status / git pull 都会别扭。推完再手动把跟踪关系指回 origin。
+    $pushArgs = $proxyArgs + @('push', $pushUrl, $branch)
+}
+else {
+    $pushArgs = $proxyArgs + @('push', '-u', 'origin', $branch)
+}
 
 if ($DryRun) {
     Write-Host ("[dry ] 将执行：git " + ($pushArgs -join ' ')) -ForegroundColor Yellow
@@ -316,12 +334,13 @@ if ($pushCode -ne 0) {
     exit 4
 }
 
-# push 到具体 URL 不会更新 refs/remotes/origin/*，补一次 fetch。
-# 否则 git status 一直显示 ahead，脚本下次又会重复推送。
+# push 到具体 URL 不会更新 refs/remotes/origin/*，补一次 fetch；
+# 顺便把 upstream 纠正回 origin（历史上若有人用 -u 推到 URL，会留下脏配置）。
 if ($useHttps) {
     $refspec = 'refs/heads/' + $branch + ':refs/remotes/origin/' + $branch
-    $fetchArgs = $proxyArgs + @('fetch', $pushUrl, $refspec)
-    $null = Invoke-Git $fetchArgs
+    $null = Invoke-Git ($proxyArgs + @('fetch', $pushUrl, $refspec))
+    $null = Invoke-Git @('config', ('branch.' + $branch + '.remote'), 'origin')
+    $null = Invoke-Git @('config', ('branch.' + $branch + '.merge'), ('refs/heads/' + $branch))
 }
 
 Write-Host ''
