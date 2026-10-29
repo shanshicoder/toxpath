@@ -32,6 +32,8 @@ toxpath/
 ├── dataset/
 │   └── toxpath3_dataset.py   # 读 patch + 三分类掩膜，按类别加权采样
 ├── train_3class.py           # 训练入口（单折 / 多折 / 续训）
+├── inference.py              # checkpoint 加载、前向、Otsu 组织掩膜
+├── predict_test.py           # 三分类 → 二值肿瘤掩膜，按官方规范出提交 zip
 ├── splits.py                 # 按切片做蛇形分折（切片数自适应）
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
@@ -119,6 +121,32 @@ checkpoints3/
 └── summary.json           # 多折汇总（全折模式）
 logs3/fold1.jsonl          # 逐 epoch 的 loss / dice / acc
 ```
+
+## 三分类 → 二值肿瘤掩膜
+
+模型仍是 3 类头，二值化只是导出时多一步。三分类 softmax 互斥，所以：
+
+```
+p_肿瘤 = 1 - p_bg = p_1 + p_2        # 两种写法数值完全等价
+mask   = (p_肿瘤 >= --fg-threshold)
+```
+
+`argmax > 0` 与 `p_肿瘤 > 0.5` 也等价，因此 `dice_fg`（把 1、2 合并）就是二值 Dice。
+
+```powershell
+python predict_test.py --test-root D:\data\toxpath_test `
+  --ckpt-dir checkpoints3 --tta --min-area 128 `
+  --out-dir submission --zip submission.zip
+```
+
+产物：`submission\{slide}\{name}.png`，单通道 L、8-bit、只含 0/255、尺寸同原图，
+zip 根目录直挂 `{slide}/`（中间那层 `1.0/` 已去掉）。
+
+**不要**从 `test_images\*.tif` 重新切图——官方 patch 文件名编码了原图坐标，
+自己切的坐标系不同会对不上真值。
+
+阈值与最小连通域别用默认值硬跑：本地 83.5% 的 patch 真值全空，空图上 1 个假阳
+就让该 patch 从 1.0 变 0。要在**验证折**上扫（扫参数的脚本见「恢复旧文件」）。
 
 ## 恢复旧文件
 
