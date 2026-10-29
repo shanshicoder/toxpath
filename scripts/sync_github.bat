@@ -8,6 +8,8 @@ REM  Usage:
 REM    scripts\sync_github.bat
 REM    scripts\sync_github.bat -Message "fix: sampling weights"
 REM    scripts\sync_github.bat -DryRun
+REM    scripts\sync_github.bat -Via https        (skip the SSH auth probe)
+REM    scripts\sync_github.bat -NoCommit         (push existing commits only)
 REM ---------------------------------------------------------------------------
 setlocal
 chcp 65001 >nul

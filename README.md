@@ -38,7 +38,8 @@ toxpath/
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
 │   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
-│   └── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
+│   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
+│   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
 ```
@@ -127,6 +128,34 @@ logs3/tb/fold1/                 # TensorBoard 事件（曲线 + 预览图），�
 logs3/fold1/train_log.json      # 逐 epoch 的 loss / dice / acc（纯文本备份）
 logs3/train_*.out.log           # 启动器重定向的控制台输出
 ```
+
+## 推送改动（笔记本 → GitHub）
+
+改完代码跑一条命令，实验室机器 `git pull` 就能拿到：
+
+```powershell
+scripts\sync_github.bat                                     # 提交信息按时间自动生成
+scripts\sync_github.bat -Message "fix: 修正 fold5 采样权重"  # 自己写 message
+scripts\sync_github.bat -DryRun                             # 只打印会做什么
+scripts\sync_github.bat -NoCommit                           # 已手动 commit 过，只推送
+```
+
+脚本做四件事：校验仓库与身份 → 扫待提交文件拦住权重/数据/大文件 → `add` + `commit` → `push`，
+最后打印实验室机器该执行的命令。
+
+**协议自动选择**（`-Via auto`，默认）：先用 `BatchMode=yes` 探一次 SSH 能否免密认证。
+私钥带 passphrase 又没装 ssh-agent 时会自动改用 HTTPS——凭据从 Windows 凭据管理器取，
+不用输密码。也可以强制 `-Via ssh` 或 `-Via https`。
+
+两个踩过的环境坑，脚本里都处理了：
+
+- **代理**：git 全局配置曾把 `http.proxy` 写死到 `127.0.0.1:7890`，而那个端口没在监听，
+  连 443 都会失败（报 `Failed to connect ... over proxy`）。走 HTTPS 时脚本显式
+  `-c http.proxy= -c https.proxy=` 清空后直连。
+- **upstream**：用 HTTPS URL 推送时不带 `-u`，推完再 `fetch` 更新 `origin/main`
+  并把跟踪关系指回 `origin`，避免 `git status` 一直显示 ahead、下次又重复推送。
+
+失败时按退出码给排查清单：passphrase 输错、publickey 未授权、non-fast-forward、代理不通。
 
 ## 实验室机器：跑起来 + 看曲线（4090）
 
