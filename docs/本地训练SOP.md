@@ -136,7 +136,7 @@ python scripts\make_3class_masks.py --big-area 80000 --mid-area 30000   # 更严
 .\scripts\run_train.ps1 -Mode smoke
 ```
 
-固定用 CPU + 224 输入 + 8 个样本，只验「数据能读、标签能对、loss 能算、checkpoint 能存」，约 1 分钟。**通过标准：** 无报错、`_smoke\ckpt\` 里有 `best.pt`、日志末行是正常的 epoch 汇总。
+固定用 CPU + 224 输入 + 8 个样本，只验「数据能读、标签能对、loss 能算、checkpoint 能存」，约 1 分钟。**通过标准：** 无报错、日志末行有 `[Fold 1 Epoch 1/1]` 汇总、`_smoke\ckpt\last.pt` 已生成（`best.pt` 只在验证集存在前景时才写，没有属正常）。
 
 要额外验 CUDA 与显存，直接跑一次 GPU 小样本：
 
@@ -322,7 +322,7 @@ Get-Process -Id <PID>                                    # 还活着吗
 
 日志中文不会乱码——启动器强制 `PYTHONUTF8=1` 并去掉了大小写重复的环境变量，这两点在别的机器上是已知坑。
 
-### 5.2 一个正常 epoch 长这样
+### 5.2 一个正常 epoch 长这样（示意值，别和你的结果比对）
 
 ```
 [Fold 1 Epoch 3/12] train_loss=0.4123 train_dice_loss=0.2871 val_loss=0.3902 dice_c1=0.0312 dice_c2=0.6188 dice_fg=0.6021 acc=0.9412 (11.4 min)
