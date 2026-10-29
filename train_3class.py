@@ -105,13 +105,22 @@ DEFAULT_TB_DIR: Path = PROJECT_ROOT / "logs3" / "tb"
 DEFAULT_NUM_FOLDS: int = 5
 """默认折数。切片数少于它时会在 ``splits.build_slide_folds`` 里自动降低。"""
 
-DEFAULT_CLASS_WEIGHTS: tuple[float, float, float] = (0.20, 0.50, 0.30)
-"""CE 类别权重 (背景, 少量肿瘤, 较多肿瘤)。
+DEFAULT_CLASS_WEIGHTS: tuple[float, float, float] = (0.15, 0.55, 0.30)
+"""CE 类别权重 (背景, 零星肿瘤, 大块肿瘤)。
 
-当前值是按 5 个切片（4953 patch，类别 1 占 3.5%）调的。换成 73 个 WSI 后
-类别分布必然变化，跑 ``python scripts/make_3class_masks.py --dry-run``
-（只统计不写文件）看到新分布后，按 ``背景:少量:较多 ≈ (1/占比) 归一化``
-重新估一遍再改。
+按「标签由连通域面积/数量判定」重做数据后（4953 patch：4140 / 149 / 664，
+即 83.6% / 3.0% / 13.4%）重新估的：
+
+- 背景 0.15（旧 0.20）：背景占 83.6%，权重再高会压掉前景的梯度；
+- 零星 0.55（旧 0.50）：它现在是最稀有的类（3.0%，149 张），像素总量只占
+  全体的 0.05%，但正是二值掩膜里最容易漏的小灶，给最高权重；
+- 大块 0.30（不变）：像素占比 7.2%，样本量也足，不需要额外加权。
+
+注意这里用的是**温和加权**而不是严格的逆频率：严格逆频率会得到
+``(0.02, 0.91, 0.07)``，等于让 149 张图主导整个损失，训练会迅速过拟合。
+稀有类主要由 ``Dataset3Config.sample_weight_per_class``（1 : 6 : 2.5 的
+过采样）负责补，CE 权重只做微调。换成 73 个 WSI 后分布会变，先跑
+``python scripts/make_3class_masks.py --dry-run`` 看新分布再调。
 """
 
 
@@ -796,7 +805,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--encoder-lr-mult", type=float, default=0.1)
     p.add_argument("--class-weights", type=float, nargs=3, default=list(DEFAULT_CLASS_WEIGHTS),
-                   help="CE 权重 [背景, 少量, 较多]")
+                   help="CE 权重 [背景, 零星, 大块]")
     p.add_argument("--freeze-encoder", action="store_true")
     p.add_argument("--freeze-bn", action="store_true",
                    help="固定 BatchNorm 为 eval（batch=1 时更稳）")

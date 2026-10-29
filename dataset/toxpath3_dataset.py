@@ -8,12 +8,13 @@
 类别    含义                颜色（RGB）
 ======  ==================  =====================
 0       背景 / 非肿瘤       (0, 0, 0) 黑
-1       少量肿瘤（0.01–5%） (0, 255, 0) 绿
-2       较多肿瘤（≥5%）     (255, 0, 0) 红
+1       零星肿瘤             (0, 255, 0) 绿
+2       大块肿瘤             (255, 0, 0) 红
 ======  ==================  =====================
 
-类别由整张 patch 的前景占比决定，由 ``scripts/make_3class_masks.py`` 生成，
-前景像素按类别着色、背景纯黑。
+类别由整张 patch 的**连通域统计**决定（见 ``scripts/make_3class_masks.py``）：
+最大连通域够大、或面积中等但几乎成一整块 → 大块肿瘤；有前景但都是小灶 /
+碎片 → 零星肿瘤。前景像素按类别着色、背景纯黑。
 
 数据布局
 --------
@@ -45,20 +46,14 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
 
+# 颜色与类别定义只有一处（labels.py），避免三处各抄一份导致颜色错位
+from labels import CLASS_COLORS, CLASS_NAMES
+
 # --------------------------------------------------------------------------- #
 # 常量
 # --------------------------------------------------------------------------- #
 BIOPTIMUS_MEAN: tuple[float, float, float] = (0.707223, 0.578729, 0.703617)
 BIOPTIMUS_STD: tuple[float, float, float] = (0.211883, 0.230117, 0.177517)
-
-CLASS_COLORS: dict[int, tuple[int, int, int]] = {
-    0: (0, 0, 0),
-    1: (0, 255, 0),
-    2: (255, 0, 0),
-}
-"""类别 → 颜色，必须与 ``scripts/make_3class_masks.py`` 完全一致。"""
-
-CLASS_NAMES: dict[int, str] = {0: "背景", 1: "少量肿瘤", 2: "较多肿瘤"}
 
 _COLOR_TO_CLASS: dict[int, int] = {
     (r << 16) | (g << 8) | b: c for c, (r, g, b) in CLASS_COLORS.items()
@@ -126,10 +121,13 @@ class Dataset3Config:
     """HED 浓度偏移幅度。"""
 
     sample_weight_per_class: tuple[float, float, float] = (1.0, 6.0, 2.5)
-    """(背景, 少量肿瘤, 较多肿瘤) 的采样权重。
+    """(背景, 零星肿瘤, 大块肿瘤) 的采样权重。
 
-    数量 4139 / 172 / 642：类别 1 只有 172 张，给 6.0；
-    类别 2 给 2.5；背景 1.0。作为默认值，可在训练脚本里覆盖。
+    本地 4953 张的类别数是 4140 / 149 / 664。权重取**逆数量的平方根**再归一到背景：
+    ``sqrt(4140/149) = 5.27 → 6.0``，``sqrt(4140/664) = 2.50 → 2.5``。
+    用平方根而不是逆数量，是因为逆数量会把 149 张的类别压到近乎全部样本，
+    模型只看得到那几张图、泛化会崩；平方根在「补稀有类」和「不丢多样性」之间折中。
+    按此权重，一个 epoch 里三类样本大致是 62% / 13% / 25%。可在训练脚本里覆盖。
     """
 
     masks_dir: str = DEFAULT_MASKS_DIR
@@ -248,8 +246,8 @@ class ToxPath3Dataset(Dataset):
         print(f"[ToxPath3Dataset] mode={mode} slides={self.slides} n={n}")
         print(f"  类别分布: "
               f"0(背景)={counts[0]} ({100*counts[0]/n:.1f}%)  "
-              f"1(少量)={counts[1]} ({100*counts[1]/n:.1f}%)  "
-              f"2(较多)={counts[2]} ({100*counts[2]/n:.1f}%)")
+              f"1(零星)={counts[1]} ({100*counts[1]/n:.1f}%)  "
+              f"2(大块)={counts[2]} ({100*counts[2]/n:.1f}%)")
 
         # ---- 4) 归一化常量 ----
         self._mean: np.ndarray = np.array(BIOPTIMUS_MEAN, dtype=np.float32)

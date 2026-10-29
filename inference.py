@@ -48,6 +48,7 @@ from dataset import (  # noqa: E402
     CLASS_COLORS,
     ToxPath3Dataset,
 )
+from labels import CcConfig, label_mask  # noqa: E402
 from model import ToxPathConfig, ToxPathSegmentor  # noqa: E402
 from paths import describe_paths, resolve_data_root  # noqa: E402
 
@@ -56,11 +57,9 @@ from paths import describe_paths, resolve_data_root  # noqa: E402
 # --------------------------------------------------------------------------- #
 # 数据根不写死盘符：见 paths.py，按「命令行 > 环境变量 > 项目内 > 历史路径」解析。
 
-FG_RATIO_LOW: float = 0.0001
-"""前景占比低于此值 → patch 级标签 0（背景）。与 make_3class_masks.py 一致。"""
+# patch 级类别（0 背景 / 1 零星 / 2 大块）由 labels.py 的连通域规则给出，
+# 不再用「前景占比 5%」这种会把大块与小灶混为一谈的阈值。
 
-FG_RATIO_HIGH: float = 0.05
-"""前景占比 ≥ 此值 → patch 级标签 2（较多肿瘤）。与 make_3class_masks.py 一致。"""
 
 _MEAN: np.ndarray = np.array(BIOPTIMUS_MEAN, dtype=np.float32)
 _STD: np.ndarray = np.array(BIOPTIMUS_STD, dtype=np.float32)
@@ -202,13 +201,13 @@ def fg_ratio_of(mask: np.ndarray) -> float:
     return float((mask > 0).mean())
 
 
-def bin_fg_ratio(ratio: float) -> int:
-    """把前景占比按 make_3class_masks.py 的阈值分箱 → {0,1,2}。"""
-    if ratio < FG_RATIO_LOW:
-        return 0
-    if ratio < FG_RATIO_HIGH:
-        return 1
-    return 2
+def label_of_mask(mask: np.ndarray, cfg: CcConfig | None = None) -> int:
+    """按 ``labels.CcConfig`` 的连通域规则给一张类别图定 patch 级类别 → {0,1,2}。
+
+    与训练标签同一套规则：最大连通域够大（或中等但成团）→ 2，只有小灶/碎片 → 1，
+    前景过少 → 0。
+    """
+    return label_mask(mask > 0, cfg)[0]
 
 
 def colorize(mask: np.ndarray) -> np.ndarray:
@@ -300,7 +299,7 @@ def run_inference(
         rec: dict[str, Any] = {
             "slide": s["slide"], "name": s["name"],
             "pred_fg_ratio": round(ratio, 8),
-            "pred_label": bin_fg_ratio(ratio),
+            "pred_label": label_of_mask(pred),
         }
         records.append(rec)
 

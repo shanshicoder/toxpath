@@ -6,8 +6,8 @@
 输入  1024×1024 H&E patch            [B, 3, 1024, 1024]
 输出  逐像素 3 类 logits             [B, 3, 1024, 1024]
 类别  0 = 背景 / 非肿瘤
-      1 = 前景占比 0.01% ~ 5%（少量肿瘤）
-      2 = 前景占比 ≥ 5%（较多肿瘤）
+      1 = 零星肿瘤（只有小灶 / 碎片，最大连通域 < 5 万 px）
+      2 = 大块肿瘤（存在实体瘤灶）
 ```
 
 编码器（H0-mini ViT-B/14）与四路 Neck 沿用 HistoPLUS，只把原来的 np/hv/tp
@@ -35,6 +35,7 @@ toxpath/
 ├── inference.py              # checkpoint 加载、前向、Otsu 组织掩膜
 ├── predict_test.py           # 三分类 → 二值肿瘤掩膜，按官方规范出提交 zip
 ├── splits.py                 # 按切片做蛇形分折（切片数自适应）
+├── labels.py                 # 三分类定义：颜色、名称、连通域定类规则（唯一来源）
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
 │   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
@@ -67,20 +68,40 @@ CPU 机器（只验形状）把第一行换成 `.../whl/cpu`。
 data/toxpath/
 ├── train_patches/{slide}/1.0/{X}_{Y}.jpeg        # 1024×1024 patch
 ├── train_masks_classes/{slide}/1.0/{X}_{Y}.png   # 三分类彩色掩膜（黑/绿/红）
-└── _patch_labels_3class.csv                      # slide,name,n_fg_px,fg_ratio,label
+└── _patch_labels_3class.csv                      # 标签索引（8 列，见下）
 ```
 
 路径不写死，`paths.py` 按 **命令行 `--data-root` > 环境变量 `TOXPATH_DATA_ROOT` >
 `<项目>/data/toxpath` > 同级目录 > 历史绝对路径** 的顺序找，找不到会列出所有候选。
 权重同理：`--histoplus-ckpt` > `TOXPATH_HISTOPLUS_CKPT` > `<项目>/weights/`。
 
-三分类标签由二值 mask 派生（类别按整张 patch 的前景占比划分：<0.01% 记背景，
-0.01%~5% 记 1，≥5% 记 2）：
+三分类标签由二值 mask 派生，类别按**每个 patch 的连通域统计**判定（4 邻接，
+规则与颜色集中定义在 `labels.py`，训练、导出、可视化共用一份）：
+
+| 条件 | 类别 |
+|---|---|
+| 前景像素 < 128（≈11×11，视为标注噪声） | 0 背景 |
+| 最大连通域 ≥ 50,000 px（≈4.8% patch） | 2 大块 |
+| 最大连通域 ≥ 20,000 px **且** 有效连通域 ≤ 2 个 **且** 最大域占前景 ≥ 80% | 2 大块 |
+| 其余有前景的情形（小灶、散点、碎片） | 1 零星 |
+
+为什么用面积 + 数量而不是前景占比：占比把「一大块瘤」和「两百个小灶加起来」
+算成同一个数，形态完全不同却归同一类。用最大连通域面积看「有没有实体灶」，
+用域数 + 主体占比看「是不是散成碎片」——同样 2 万像素，一整块算瘤灶，
+几十个碎点只是零星浸润。
+
+本地 5 切片 4953 张的实测分布：**4140 / 149 / 664**（83.6% / 3.0% / 13.4%），
+有前景的 816 张里 75% 只有一个连通域（域数 p50=1、p95=3、p99=7）。
 
 ```powershell
-python scripts/make_3class_masks.py --dry-run   # 只统计分布，不写文件
-python scripts/make_3class_masks.py             # 生成 train_masks_classes/ 与 CSV
+python scripts/make_3class_masks.py --dry-run   # 只统计分布，不写文件（约 45 s）
+python scripts/make_3class_masks.py             # 生成 train_masks_classes/ 与 CSV（约 5 min）
+python scripts/make_3class_masks.py --big-area 80000 --mid-area 30000   # 想更严格可调
 ```
+
+CSV 列为 `slide,name,n_fg_px,fg_ratio,n_cc,max_cc_px,dominance,label`。保留
+`fg_ratio` 是给 `splits.py` 排序肿瘤负荷、训练端统计空真值用的；后三列让阈值
+调整可以事后重算，不必重新扫一遍连通域。
 
 ## 训练
 
@@ -109,7 +130,7 @@ python train_3class.py --fold 1 --epochs 24 --resume checkpoints3/fold1/last.pt
 | `--grad-accum` | 8 | 等效 batch = batch_size × grad_accum |
 | `--samples-per-epoch` | 800 | 按类别权重采样，不是全量遍历 |
 | `--lr` / `--encoder-lr-mult` | 3e-4 / 0.1 | 编码器用 1/10 学习率 |
-| `--class-weights` | 0.20 0.50 0.30 | 背景 / 少量 / 较多 |
+| `--class-weights` | 0.15 0.55 0.30 | 背景 / 零星 / 大块（逆频率平方根估的温和加权） |
 | `--init` | encoder+neck | 可选 `none`/`encoder`/`encoder+neck`/`full` |
 | `--freeze-encoder` | 关 | 显存吃紧时开 |
 | `--amp` | 开 | CUDA 上 bfloat16 |
