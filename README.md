@@ -13,15 +13,49 @@
 编码器（H0-mini ViT-B/14）与四路 Neck 完全沿用 HistoPLUS，只把原来的
 np/hv/tp 三个解码头换成一个 3 类语义头；总参数 114.1 M。
 
-## 环境
+## 快速开始（实验室 RTX 4090）
 
-```bash
-conda activate toxpath          # python 3.10 + torch + timm==1.0.8
-# 若 conda activate 不可用：
-source "D:/Program Files/anaconda3/etc/profile.d/conda.sh"
+```powershell
+# 0) 笔记本上：打包（第一次带权重 → weights\ 会一起塞进包里）
+.\scripts\make_code_package.bat -IncludeWeights   # 代码 + 271 MB 权重，约 250 MB
+.\scripts\make_code_package.bat                    # 之后只同步代码，约 260 KB
+
+# 1) 实验室机器：建环境（一次）
+conda create -n toxpath python=3.10 -y
+conda activate toxpath
+pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+pip install timm==1.0.8 numpy Pillow
+
+# 2) 体检：GPU / torch / timm / 数据 / 权重 / 磁盘
+python scripts\check_env.py --data-root "D:\data\toxpath"
+
+# 3) 冒烟 5 分钟 → 单折 → 5 折
+.\scripts\train_local.bat -Mode smoke
+.\scripts\train_local.bat -Mode fold -Fold 1 -Epochs 20
+.\scripts\train_local.bat -Mode all -Epochs 20
 ```
 
-本地是 CPU 版 torch，只做形状/管线冒烟；正式训练在 AutoDL 4090D 上用 CUDA 版。
+细节（电源设置、远程桌面断开、续训、评测、故障排查）见 `docs/本地训练SOP.md`。
+
+## 环境
+
+代码要跑在两台机器上：笔记本（CPU，只做形状冒烟）和实验室工作站（RTX 4090 24 GB，正式训练）。
+**数据根与权重路径不写死**，统一由 `paths.py` 按「命令行 > 环境变量 > 项目内相对路径 > 历史绝对路径」解析，
+换机器不用改代码。
+
+```powershell
+# 实验室机器（Windows + 4090）
+conda create -n toxpath python=3.10 -y
+conda activate toxpath
+pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+pip install timm==1.0.8 numpy Pillow
+
+# 一条命令体检（GPU / torch / timm / 数据 / 权重 / 磁盘）
+python scripts\check_env.py --data-root "D:\data\toxpath"
+```
+
+完整的本地训练流程见 **[docs/本地训练SOP.md](docs/本地训练SOP.md)**（环境搭建、电源设置、冒烟、5 折、续训、评测、故障排查）。
+
 
 ## 数据
 
@@ -52,13 +86,25 @@ python scripts/make_3class_masks.py             # 写 train_masks_classes/
 
 ## 训练
 
+一键脚本（推荐，后台运行 + 日志重定向，远程桌面断开不影响）：
+
+```powershell
+.\scripts\train_local.bat -Mode smoke                 # 冒烟：1 epoch / 32 样本，约 5 分钟
+.\scripts\train_local.bat -Mode fold -Fold 1 -Epochs 20   # 单折
+.\scripts\train_local.bat -Mode all -Epochs 20            # 5 折，约 8~10 小时
+.\scripts\train_local.bat -Mode resume -Fold 1            # 从 last.pt 续训
+.\scripts\train_local.bat -Mode all -DryRun               # 只打印命令，不启动
+```
+
+直接调 Python（等价写法）：
+
 ```bash
-# 单折（1024 输入，4090D）
-python train_3class.py --fold 1 --epochs 12 --batch-size 1 --grad-accum 8 \
-    --samples-per-epoch 800 --amp --grad-checkpointing
+# 单折（1024 输入，4090）
+python train_3class.py --fold 1 --epochs 20 --batch-size 1 --grad-accum 8 \
+    --samples-per-epoch 800 --val-every 2 --amp --grad-checkpointing
 
 # 全 5 折（按切片留一）
-python train_3class.py --all-folds --epochs 12 --batch-size 1 --grad-accum 8 --amp
+python train_3class.py --all-folds --epochs 20 --batch-size 1 --grad-accum 8 --amp
 
 # 本地 CPU 冒烟
 python train_3class.py --fold 1 --epochs 1 --image-size 224 --max-train-samples 4 \
@@ -67,8 +113,19 @@ python train_3class.py --fold 1 --epochs 1 --image-size 224 --max-train-samples 
 
 产物：`checkpoints3/foldN/{best.pt,last.pt,history.json}`、
 `logs3/foldN/train_log.json`、`checkpoints3/summary.json`。
+实际单次运行日志在 `logs3/_runs/<模式>_<时间戳>.log`。
 
-预训练权重默认从 `E:/project/histoplus_cellvit_segmentor_20x.pt` 加载：
+预训练权重按以下顺序查找（不再写死 E 盘）：
+
+1. `--histoplus-ckpt`
+2. 环境变量 `TOXPATH_HISTOPLUS_CKPT`
+3. `<项目根>/weights/histoplus_cellvit_segmentor_20x.pt` ← 推荐
+4. `<项目根>/histoplus_cellvit_segmentor_20x.pt`
+5. `<项目根>/../histoplus_cellvit_segmentor_20x.pt`
+6. `E:/project/histoplus_cellvit_segmentor_20x.pt`（笔记本旧位置）
+
+> 用 `make_code_package.bat -IncludeWeights` 打的包，解压后权重就在
+> `<项目根>/weights/` 下，第 3 条直接命中，不用配任何环境变量。
 
 | `--init` | 加载内容 |
 |---|---|
@@ -76,10 +133,37 @@ python train_3class.py --fold 1 --epochs 1 --image-size 224 --max-train-samples 
 | `encoder+neck` | 编码器 + 四路 Neck（68 个张量，默认） |
 | `full` | 再加 np 解码头（71/73，最后一层 1×1 因 3 类而跳过） |
 
+## 评测与推理（训练完成后）
+
+```powershell
+# 单折评测
+python evaluate.py --fold 1 --ckpt checkpoints3\fold1\best.pt
+
+# 全 5 折 + 汇总（mean ± std → eval3\summary.csv）
+python evaluate.py --all-folds --ckpt-dir checkpoints3
+
+# 单张切片推理出彩色预测图 / 三联对比图
+python inference.py --ckpt checkpoints3\fold1\best.pt --slide train_001 `
+    --out-dir runs3\pred_fold1 --save-pred --overlay-every 20
+
+# 本地 CPU 冒烟（随机权重 + 224 输入）
+python evaluate.py --fold 1 --ckpt <任意.pt> --image-size 224 `
+    --max-samples 8 --device cpu --overlay-every 2
+```
+
+三层指标（`eval3/foldN/metrics.json` + `per_patch.csv` + `summary.csv`）：
+
+| 口径 | 指标 | 用途 |
+|---|---|---|
+| `full_*` 整图 | 每类 Dice/IoU + 像素精度 | 与训练日志同口径 |
+| `tissue_*` 组织区域内 | 同上（Otsu 剔除白色空背景） | **主指标**，写报告用 |
+| `patch_acc` | 预测前景占比按 0.01%/5% 分箱 vs 真值 | 「少量 vs 较多」分级准确率 |
+
 ## 目录
 
 ```
 toxpath/
+├── weights/                  # HistoPLUS 权重 271 MB（gitignore，随 -IncludeWeights 包分发）
 ├── model/
 │   ├── config.py     # ToxPathConfig（num_classes/in_channels/patch_size/...）
 │   ├── blocks.py     # ConvNormAct / DeconvNormAct / SwiGLUFFNFused
@@ -91,9 +175,20 @@ toxpath/
 ├── dataset/
 │   └── toxpath3_dataset.py   # 1024 输入、彩色三分类 mask、采样权重
 ├── scripts/
+│   ├── check_env.py          # 环境体检：GPU/torch/timm/数据/权重/磁盘 + 参数推荐
+│   ├── train_local.ps1       # Windows 一键训练（smoke/fold/all/resume，后台运行）
+│   ├── train_local.bat       # 上面脚本的启动器（绕过 .ps1 执行策略限制，推荐用这个）
+│   ├── make_code_package.ps1 # 只打代码（约 250 KB），用于拷到实验室机器
+│   ├── make_code_package.bat # 上面脚本的启动器
 │   └── make_3class_masks.py  # 二值 mask → 彩色三分类 mask
 ├── tests/
+│   ├── test_dataset.py       # Dataset 35 项测试
 │   └── test_model_forward.py # 模型形状/反传/冻结/权重往返 8 项测试
+├── docs/
+│   └── 本地训练SOP.md        # Windows + 4090 全流程（电源设置、续训、故障排查）
+├── paths.py                  # 数据根/权重统一解析（命令行>环境变量>项目内>历史）
+├── inference.py              # 推理：彩色预测图 / 三联对比图 / Otsu 组织掩膜
+├── evaluate.py               # 正式评测：整图 + 组织区域 + patch 分级，5 折汇总
 └── train_3class.py           # 5 折训练脚本（AMP + 梯度累积）
 ```
 

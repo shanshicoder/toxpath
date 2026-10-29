@@ -1,0 +1,28 @@
+# 跨机器（笔记本 / 实验室工作站）同步时统一换行符
+# 不写这条，Windows 上 core.autocrlf 会把 py/md 全改一遍，diff 全是噪音
+* text=auto
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.toml  text eol=lf
+
+# Windows 脚本必须是 CRLF，否则 PowerShell 5.1 / cmd 可能解析异常
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制：让 git 别尝试合并或转换
+*.pt    binary
+*.pth   binary
+*.npy   binary
+*.npz   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.tif   binary
+*.tiff  binary
+*.zip   binary

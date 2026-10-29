@@ -15,17 +15,22 @@ data/
 # ---- 训练产物 ----
 checkpoints/
 checkpoints3/
+checkpoints3_smoke/
 logs/
 logs3/
-outputs/
+logs3_smoke/
+eval3/
 runs/
+runs3/
+outputs/
 *.pt
 *.pth
 *.log
 nohup.out
+*.zip
 
-# ---- 旧方案存档（只保留在本地）----
-_deprecated/
+# ---- 本地权重目录（271 MB，走 GitHub Release 分发，不进仓库）----
+weights/
 
 # ---- 临时可视化 ----
 mask_visual_check.png
