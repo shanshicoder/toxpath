@@ -13,6 +13,7 @@
 |---|---|
 | 体检：这台机器能不能开训 | `nvidia-smi` + 第 1 节逐项核对 |
 | 拉最新代码 | `git pull` |
+| **数据在项目外 / 换了盘** | `python paths.py` 确认解析结果；临时指定用 `-DataRoot "D:\data\toxpath"`（见 1.5） |
 | 数据换过 / 第一次跑 | `python scripts\make_3class_masks.py --dry-run` 看分布 → 去掉 `--dry-run` 生成 |
 | 冒烟（约 1 分钟） | `.\scripts\run_train.ps1 -Mode smoke` |
 | 单折训练 | `.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12` |
@@ -91,24 +92,60 @@ Get-FileHash .\weights\histoplus_cellvit_segmentor_20x.pt -Algorithm SHA256
 # 字节数：284507558
 ```
 
-### 1.5 数据
+### 1.5 数据（放在项目外也可以）
+
+**规则只有一条：`--data-root` 指的是「包含 `train_patches/` 的那一层」，不是 `train_patches` 本身。** 目录名不必叫 `toxpath`，位置不必在项目里。
 
 ```
-D:\data\toxpath\
-├── train_patches\{slide}\1.0\{X}_{Y}.jpeg        # 1024×1024，训练读这个
-├── train_masks_classes\{slide}\1.0\{X}_{Y}.png   # 彩色三分类 mask（黑/绿/红）
-├── train_masks\...                               # 原始二值 mask，重造标签时用
-├── _patch_labels_3class.csv                      # 标签索引
-├── train_images\ train_labels\                   # 金字塔 TIFF + GeoJSON，训练不读
+D:\data\toxpath\                                  ← 这就是 data-root
+├── train_patches\{slide}\1.0\{X}_{Y}.jpeg         # 1024×1024，训练读这个
+├── train_masks_classes\{slide}\1.0\{X}_{Y}.png    # 彩色三分类 mask（黑/绿/红）
+├── train_masks\...                                # 原始二值 mask，重造标签时用
+├── _patch_labels_3class.csv                       # 标签索引
+├── train_images\ train_labels\                    # 金字塔 TIFF + GeoJSON，训练不读
 ```
 
-数据放哪都行，别改代码。推荐设一次环境变量（重开窗口生效）：
+三种指定方式，按优先级从高到低：
+
+| 方式 | 怎么写 | 适合 |
+|---|---|---|
+| 命令行 | `--data-root "D:\data\toxpath"`<br>`run_train.ps1` 用 `-DataRoot "D:\data\toxpath"` | 临时用一次、或同一台机器跑多份数据 |
+| 环境变量 | `setx TOXPATH_DATA_ROOT "D:\data\toxpath"`（**重开终端才生效**） | 这台机器长期只用这一份数据 |
+| 放项目内 | `<项目根>\data\toxpath\` | 换机器直接拷整个项目，最省事 |
+
+命令行永远覆盖环境变量。还有两个兜底候选（`<项目根>\../data\toxpath`、笔记本的历史路径），只在前三个都不存在时才会命中。
+
+**先自检，别等训练跑了 3 分钟才报错：**
 
 ```powershell
-setx TOXPATH_DATA_ROOT "D:\data\toxpath"
+python paths.py
 ```
 
-只想临时指定就每条命令加 `--data-root "D:\data\toxpath"`，`run_train.ps1` 对应参数是 `-DataRoot`。
+输出会列出当前解析结果和**全部候选**，命中的标 `OK`、不存在的标 `--`：
+
+```
+[paths] 当前解析：
+  project_root : E:\project\toxpath
+  data_root    : D:\data\toxpath          ← 确认这里是你要的那份
+  histoplus    : E:\project\toxpath\weights\histoplus_cellvit_segmentor_20x.pt
+```
+
+**产物目录与数据位置无关。** `checkpoints3/`、`logs3/`、`logs3/tb` 的默认值是**项目根下的绝对路径**（写死在 `train_3class.py:101-103`），数据在 D 盘也照样落在项目里。想让产物跟着数据走，必须显式传：
+
+```powershell
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12 -DataRoot "D:\data\toxpath_73" `
+  -ExtraArgs @("--out-dir","D:\runs\toxpath_73\ckpt",
+               "--log-dir","D:\runs\toxpath_73\log",
+               "--tb-dir","D:\runs\toxpath_73\tb")
+```
+
+**相对路径的坑（已实测）**：显式传 `--out-dir relckpt` 这样的相对路径时，它相对的是**当前工作目录**，不是项目根。`cd E:\tmp` 后跑，产物就落在 `E:\tmp\relckpt`。所以跨目录启动时，**输出目录一律写绝对路径**；用 `run_train.ps1` 则无此问题（它内部 `Set-Location` 到项目根）。
+
+**用外部盘时的三条经验：**
+
+1. **网络盘 / 移动硬盘要把 `--num-workers` 降下来**（`-NumWorkers 2` 或 `3`）。4 个进程排队读同一块慢盘，GPU 会空转等 I/O，比单进程还慢。
+2. **路径含空格没问题**：`-DataRoot "E:\my data\toxpath"` 实测引号被正确剥离，Python 收到的是干净路径。
+3. **别把 `--data-root` 指到 `train_patches` 那一层**，会报 `其下是否有 train_patches：False`——这句报错就是在提示高了一层。
 
 ### 1.6 生成三分类标签（换数据后必做）
 
@@ -125,6 +162,8 @@ setx TOXPATH_DATA_ROOT "D:\data\toxpath"
 python scripts\make_3class_masks.py --dry-run     # 只统计分布，约 45 秒（5 切片）
 python scripts\make_3class_masks.py               # 确认后写文件，约 5 分钟（5 切片）
 ```
+
+数据在项目外时照常加 `--data-root`，**输出会写回那个数据根**（`<data-root>\train_masks_classes\` 和 `<data-root>\_patch_labels_3class.csv`），不会跑到项目目录里。已实测。
 
 **看 `--dry-run` 的分布再决定阈值**。本地 4953 张的结果是 **4140 / 149 / 664**（83.6% / 3.0% / 13.4%）。上 73 张 WSI、约 7 万 patch 时，如果分辨率或标注风格变了导致类别 1 塌到接近 0，就调阈值：
 
@@ -287,6 +326,8 @@ python train_3class.py --fold 1 --epochs 12 --grad-checkpointing `
 
 **输出目录必须换。** `save_folds` 每次启动都会写 `<out-dir>\splits.json`，沿用 `checkpoints3` 的话，5 切片时代的划分会被 73 张的新划分直接覆盖，旧 checkpoint 的评测就再也对不上划分了。所以上面显式指定了 `checkpoints3_73` / `logs3_73`。
 
+换目录后看板也要跟着换，否则打开是空的：`.\scripts\run_train.ps1 -Mode tb -TbDir "logs3_73\tb"`。这几条相对路径能安全使用，是因为 `run_train.ps1` 会先 `Set-Location` 到项目根；**直接跑 `python train_3class.py` 时相对路径跟着当前目录走，一律写绝对路径**（见 1.5）。
+
 **第一次务必先跑 1 个 epoch 量真实时长**，别拿上表当预算：
 
 ```powershell
@@ -311,6 +352,12 @@ python train_3class.py --fold 1 --epochs 12 --grad-checkpointing `
 ```powershell
 cd D:\work\toxpath
 .\scripts\run_train.ps1 -Mode tb            # 默认 6006；-Port 6010 换端口
+```
+
+**默认只看 `logs3\tb`。** 如果你训练时用了别的 `--tb-dir`，看板要跟着指过去，否则页面能打开但一条曲线都没有：
+
+```powershell
+.\scripts\run_train.ps1 -Mode tb -TbDir "D:\runs\toxpath_73\tb"
 ```
 
 浏览器开 `http://127.0.0.1:6006`。局域网里别的机器开 `http://<实验室机器IP>:6006`。
@@ -546,6 +593,10 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 | `dice_binary` 是 `nan` | 该折验证集一个前景像素都没有 | 正常，说明这折没法学到前景 |
 | 改了参数但训练没变化 | 参数直接写在启动器后面（它不认），或用了 `-Mode smoke` | 一律放进 `-ExtraArgs`；加 `-Foreground` 会把完整命令行打出来核对 |
 | 找不到数据 / 权重 | `paths.py` 候选都没命中 | 报错会列出全部试过的路径，按提示设 `TOXPATH_DATA_ROOT` / `TOXPATH_HISTOPLUS_CKPT` |
+| `--data-root 指向的目录不可用` / `其下是否有 train_patches：False` | 指到了 `train_patches` 那一层，或指到了父目录 | 指向**包含** `train_patches/` 的那一层；`python paths.py` 先自检 |
+| 训练跑起来了，但结果明显不是这份数据 | 环境变量指向了另一份数据，命令行没覆盖它 | 看日志头 `data_root` 那一行是否是你以为的路径；临时用 `-DataRoot` 覆盖 |
+| 产物落在奇怪的地方（比如 `E:\tmp\checkpoints3`） | 显式传了相对的 `--out-dir`，而当时的工作目录不在项目根 | 一律写绝对路径；或改用 `run_train.ps1`（内部会切到项目根） |
+| 看板能打开，但一条曲线都没有 | 训练时用了别的 `--tb-dir`，看板还在看 `logs3\tb` | `-Mode tb -TbDir "<训练时的 tb 目录>"`，启动日志里的 `[logdir ]` 会回显实际目录 |
 | 训练日志停在某轮、GPU 占用 0 | 睡眠或重启 | 第 2 节设电源策略，`-Mode resume` 续上 |
 | 同折曲线上有两条重叠 | 用了旧事件目录 | 新代码重跑会自动带时间戳后缀；清 `logs3\tb\foldN_*` 里不要的 |
 | 局域网打不开 6006 | 防火墙 | 第 4.1 节的 `netsh` 命令 |

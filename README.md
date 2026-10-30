@@ -79,6 +79,12 @@ data/toxpath/
 `<项目>/data/toxpath` > 同级目录 > 历史绝对路径** 的顺序找，找不到会列出所有候选。
 权重同理：`--histoplus-ckpt` > `TOXPATH_HISTOPLUS_CKPT` > `<项目>/weights/`。
 
+数据放在项目外（比如 `D:\data\toxpath_73`）完全可行，`--data-root` 指的是**包含
+`train_patches/` 的那一层**。但**产物目录不跟着数据走**：`checkpoints3/`、`logs3/`
+默认锚定项目根，要换得显式传 `--out-dir / --log-dir / --tb-dir`，且**写绝对路径**——
+相对的 `--out-dir` 跟着当前工作目录走。`python paths.py` 可随时自检解析结果。
+详细步骤见 `docs/本地训练SOP.md` 第 1.5 节。
+
 三分类标签由二值 mask 派生，类别按**每个 patch 的连通域统计**判定（4 邻接，
 规则与颜色集中定义在 `labels.py`，训练、导出、可视化共用一份）：
 

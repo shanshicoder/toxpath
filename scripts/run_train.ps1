@@ -12,6 +12,7 @@
 #   all     train all folds (leave-one-slide-out)
 #   resume  continue a fold from checkpoints3\foldN\last.pt
 #   tb      serve TensorBoard on logs3\tb (run this in a second window)
+#           use -TbDir if you trained with a different --tb-dir
 #
 # Examples:
 #   .\scripts\run_train.ps1 -Mode smoke
@@ -19,6 +20,7 @@
 #   .\scripts\run_train.ps1 -Mode all -Epochs 12
 #   .\scripts\run_train.ps1 -Mode resume -Fold 1 -Epochs 20
 #   .\scripts\run_train.ps1 -Mode tb                    # then open http://<lab-ip>:6006
+#   .\scripts\run_train.ps1 -Mode tb -TbDir "logs3_73\tb"   # curves written elsewhere
 #   .\scripts\run_train.ps1 -Mode fold -Fold 1 -DataRoot "D:\data\toxpath"
 #   .\scripts\run_train.ps1 -Mode fold -Foreground      # keep it attached (Ctrl+C works)
 #   .\scripts\run_train.ps1 -Mode all -Epochs 12 -NoGradCkpt   # 48 GB cards only
@@ -41,6 +43,11 @@ param(
 
     # TensorBoard port for -Mode tb
     [int]$Port = 6006,
+
+    # Event dir served by -Mode tb. Must match the --tb-dir you trained with,
+    # otherwise the page loads but shows nothing. Relative paths are resolved
+    # against the repo root (this script always Set-Location there).
+    [string]$TbDir = "logs3\tb",
 
     # Empty = let paths.py resolve it (TOXPATH_DATA_ROOT / data\toxpath / ...)
     [string]$DataRoot = "",
@@ -228,15 +235,17 @@ if ($Mode -eq "tb") {
     if ($LASTEXITCODE -ne 0) {
         throw "tensorboard is not installed for $PythonExe - run: `"$PythonExe`" -m pip install tensorboard"
     }
-    if (-not (Test-Path "logs3\tb")) {
-        Write-Host "[tb     ] logs3\tb not found - no run has written curves yet."
-        New-Item -ItemType Directory -Path "logs3\tb" | Out-Null
+    if (-not (Test-Path $TbDir)) {
+        Write-Host ("[tb     ] {0} not found - no run has written curves there yet." -f $TbDir)
+        New-Item -ItemType Directory -Path $TbDir -Force | Out-Null
     }
     $tbStamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $tbOut = "logs3\tb_$tbStamp.out.log"
     $tbErr = "logs3\tb_$tbStamp.err.log"
+    # tensorboard wants forward slashes on Windows too; harmless if already so
+    $tbDirArg = $TbDir.Replace('\', '/')
     $tbProc = Start-Process -FilePath $PythonExe `
-        -ArgumentList @("-m", "tensorboard.main", "--logdir", "logs3/tb",
+        -ArgumentList @("-m", "tensorboard.main", "--logdir", $tbDirArg,
                         "--port", "$Port", "--host", "0.0.0.0") `
         -WorkingDirectory $Root `
         -WindowStyle Hidden `
@@ -244,6 +253,7 @@ if ($Mode -eq "tb") {
         -RedirectStandardError $tbErr `
         -PassThru
     Write-Host ("[pid    ] {0}" -f $tbProc.Id)
+    Write-Host ("[logdir ] {0}" -f $tbDirArg)
     Write-Host "[url    ] http://127.0.0.1:$Port/    LAN: http://<this-pc-ip>:$Port/"
     Write-Host ("[stdout ] {0}" -f $tbOut)
     Write-Host "[tips   ] page is live after ~10 s; training appends to it automatically"
