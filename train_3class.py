@@ -258,6 +258,14 @@ def metrics_from_conf(conf: np.ndarray) -> dict[str, float]:
     out["iou_fg"] = float(np.mean(
         [float(iou[c]) for c in range(1, num_classes) if support[c] > 0]
     )) if fg_vals else float("nan")
+    # 二值口径：把类 1、2 合并成一类前景后重算，与导出掩膜（只有 0/255）的定义一致。
+    # 注意 dice_fg 是两类 Dice 的算术平均，不是这个数：类 1 像素极少时，
+    # 宏平均会被它拖下来，而合并后的二值 Dice 几乎由类 2 决定。
+    tp_bin: float = float(conf[1:, 1:].sum())
+    fp_bin: float = float(conf[0, 1:].sum())
+    fn_bin: float = float(conf[1:, 0].sum())
+    out["dice_binary"] = ((2 * tp_bin) / (2 * tp_bin + fp_bin + fn_bin + eps)
+                          if (tp_bin + fn_bin) > 0 else float("nan"))
     out["pixel_acc"] = float(tp.sum() / (conf.sum() + eps))
     return out
 
@@ -343,6 +351,7 @@ def log_epoch(
         ("dice_c1", "val/dice_c1"),
         ("dice_c2", "val/dice_c2"),
         ("dice_fg", "val/dice_fg"),
+        ("dice_binary", "val/dice_binary"),
         ("iou_fg", "val/iou_fg"),
         ("pixel_acc", "val/pixel_acc"),
     ):
@@ -772,6 +781,7 @@ def train_fold(
         "last_dice_fg": history[-1].get("dice_fg", float("nan")) if history else float("nan"),
         "last_dice_c1": history[-1].get("dice_c1", float("nan")) if history else float("nan"),
         "last_dice_c2": history[-1].get("dice_c2", float("nan")) if history else float("nan"),
+        "last_dice_binary": history[-1].get("dice_binary", float("nan")) if history else float("nan"),
     }
 
 

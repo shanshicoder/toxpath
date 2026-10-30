@@ -1,7 +1,8 @@
 # ToxPath 实验室本地训练 SOP
 
 > 适用机器：实验室 Windows 工作站，单卡 **RTX 4090 24 GB**，通过远程桌面 / 向日葵操作
-> 适用代码：`7b8df82` 及之后（三分类标签已改为连通域规则，训练监控走 TensorBoard）
+> 适用代码：main 分支（连通域三分类标签、TensorBoard 监控、默认开梯度检查点、`dice_binary` 指标、`-ExtraArgs` 参数透传）
+> 版本自检：`Select-String -Path scripts\run_train.ps1 -Pattern "ExtraArgs"` 没输出就说明代码旧了，先 `git pull`。
 > 本文是**照着敲就能跑**的操作手册；原理和取舍看 `README.md`，这里只讲怎么做、怎么判断正常、出问题查哪。
 
 ---
@@ -15,6 +16,7 @@
 | 数据换过 / 第一次跑 | `python scripts\make_3class_masks.py --dry-run` 看分布 → 去掉 `--dry-run` 生成 |
 | 冒烟（约 1 分钟） | `.\scripts\run_train.ps1 -Mode smoke` |
 | 单折训练 | `.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12` |
+| 临时改某个训练参数 | `.\scripts\run_train.ps1 -Mode fold -ExtraArgs "--samples-per-epoch","3500"`（见 3.4） |
 | 五折训练（过夜） | `.\scripts\run_train.ps1 -Mode all -Epochs 12` |
 | 断点续训 | `.\scripts\run_train.ps1 -Mode resume -Fold 1 -Epochs 24` |
 | 起监控看板 | `.\scripts\run_train.ps1 -Mode tb` → 浏览器开 `http://127.0.0.1:6006` |
@@ -211,7 +213,15 @@ conda activate toxpath
 
 ### 3.4 参数与预期资源
 
-默认值（都能用命令行覆盖）：
+默认值如下。注意**启动器只自动传 `--fold / --epochs / --num-workers` 和 `--data-root / --grad-checkpointing`**，表里其他参数要自己用 `-ExtraArgs` 透传，否则改了不生效：
+
+```powershell
+# 逗号分隔或逐个写都行，两种等价
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12 -ExtraArgs "--samples-per-epoch","3500","--val-every","3"
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12 -ExtraArgs "--samples-per-epoch,3500,--val-every,3"
+```
+
+`-ExtraArgs` 追加在最后，所以同名的参数会覆盖启动器的默认值（`--grad-checkpointing` 除外，它是开关，要关用 `-NoGradCkpt`）。冒烟模式不吃这个参数，它用的是固定的一小串。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -244,6 +254,53 @@ python train_3class.py --fold 1 --epochs 12 --grad-checkpointing `
 ```
 
 真的挤不下再上 `--freeze-encoder`（只训 neck + 解码头），但那已经不是完整微调了，结果要单独标注。
+
+### 3.5 换成 73 张 WSI 时要改什么
+
+数据从 5 个切片扩到 73 个（约 7 万 patch）后，**默认参数会跑不完**——不是报错，是五折要跑六天。三件事必须跟着调。
+
+**① 时长会从"过夜"变成"一周"。** 按 4953 张的实测口径外推（训练 ~1 s/样本、验证 ~0.35 s/张）：
+
+| | 现在（4953 张） | 73 张（约 7 万 patch） |
+|---|---:|---:|
+| 每折验证 patch | ~990 | ~14,000 |
+| 每轮训练（800 样本） | 13 min | — |
+| 每轮训练（3500 样本） | — | 58 min |
+| 每轮验证 | 6 min | 82 min |
+| **每轮合计** | ~19 min | **~2.3 h** |
+| **单折 12 轮** | ~3.8 h | **~28 h** |
+| **五折** | ~19 h | **~6 天** |
+
+**② `--samples-per-epoch` 必须提到 3500 左右。** 默认 800 在 7 万张里只覆盖 1.1%，12 轮 × 800 = 9600 次采样，对有放回采样来说等于一遍都没看完。
+
+**③ 验证太贵，改成每 3 轮验一次**，验证成本直接降到 1/3。加上这两条，单折降到约 17 h、五折约 3.5 天。
+
+完整命令（单行 `@()` 包起来，避免 PowerShell 跨行解析问题）：
+
+```powershell
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12 -DataRoot "D:\data\toxpath_73" -NumWorkers 6 `
+  -ExtraArgs @("--samples-per-epoch","3500","--val-every","3","--val-batch-size","2",
+               "--out-dir","checkpoints3_73","--log-dir","logs3_73","--tb-dir","logs3_73/tb")
+```
+
+`-NumWorkers` 是启动器自己的参数，别塞进 `-ExtraArgs`（塞了也能跑，但同一行会打印两次 `--num-workers`，容易看错）。
+
+**输出目录必须换。** `save_folds` 每次启动都会写 `<out-dir>\splits.json`，沿用 `checkpoints3` 的话，5 切片时代的划分会被 73 张的新划分直接覆盖，旧 checkpoint 的评测就再也对不上划分了。所以上面显式指定了 `checkpoints3_73` / `logs3_73`。
+
+**第一次务必先跑 1 个 epoch 量真实时长**，别拿上表当预算：
+
+```powershell
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 1 -DataRoot "D:\data\toxpath_73" -NumWorkers 6 `
+  -ExtraArgs @("--samples-per-epoch","3500","--val-every","1",
+               "--out-dir","checkpoints3_73","--log-dir","logs3_73","--tb-dir","logs3_73/tb")
+```
+
+日志里的分钟数 × 12 才是单折真实耗时。7 万张时 I/O 行为会变（更多 JPEG 解码、缓存命中率下降），上表的系数只是外推。
+
+**两个需要提前想清楚的问题：**
+
+- **分折只按 `mean_fg` 排序，不按中心分层。** `splits.py` 现在按肿瘤负荷升序排再蛇形分配，保证每折负荷接近，但**不保证每折的中心构成接近**。73 张如果来自多个中心，可能某一折恰好全是 A 中心的切片——那一折的 `dice_fg` 实际测的是「跨中心性能」，和其他折不可比。你的课题正是跨中心泛化，上全量数据前要么给 `splits.py` 加中心分层，要么在论文里把这一点讲明。
+- **各折 patch 数可能很不均衡。** 排序键是 `(mean_fg, n_patch, slide)`，蛇形只平衡负荷。跑前看 `[split]` 打印的 `n_patch` 列，最大/最小差超过 50% 就值得调整排序策略。
 
 ---
 
@@ -286,7 +343,16 @@ netsh advfirewall firewall add rule name=TensorBoard dir=in action=allow protoco
 | IMAGES | `fold1/preview`：每轮一张 `原图 \| 真值 \| 预测` 三联图，用 step 滑块回看 |
 | TEXT | `fold1/config`：这次运行的尺寸、lr、类别权重、验证切片等快照 |
 
-`val/*` 里有 `loss / dice_c1 / dice_c2 / dice_fg / iou_fg / pixel_acc`，还有一个 `val/dice_fg_allbg_baseline`——**验证集里真值全空的 patch 占比**，等价于「全猜背景」的 dice_fg。曲线贴着这条基线走，说明模型还没学到东西。
+`val/*` 里有 `loss / dice_c1 / dice_c2 / dice_fg / dice_binary / iou_fg / pixel_acc`，还有一个 `val/dice_fg_allbg_baseline`——**验证集里真值全空的 patch 占比**，等价于「全猜背景」的 dice_fg。曲线贴着这条基线走，说明模型还没学到东西。
+
+**`dice_fg` 和 `dice_binary` 不是一回事，别混用：**
+
+| 指标 | 算法 | 用在哪 |
+|---|---|---|
+| `dice_fg` | 类 1、类 2 各自 Dice 的**算术平均**（哪类在该批中不存在就不参与平均） | **模型选择**：`best.pt` 按它刷新 |
+| `dice_binary` | 把类 1、2 合并成一类前景后重算的**二值 Dice** | 与导出掩膜（只有 0/255）口径一致，**论文报这个** |
+
+差多少取决于类 1 的占比。举个实测例子：某个混淆矩阵下 `dice_c1=0.61`、`dice_c2=0.83`，宏平均是 **0.72**，合并二值却是 **0.86**——相差 0.14。类 1 像素越少、预测越差，这个差距越大。因为你验证集里类 1 本来就只有几十张，宏平均会被它拽下来。
 
 五折各是一个独立 run（`fold1`…`fold5`），左侧勾多个就能把同一指标叠一张图比。**同一折重跑会自动换目录**（`fold1_20261029-203015`），不会和上一次的曲线叠在一起。
 
@@ -334,10 +400,12 @@ Get-Process -Id <PID>                                    # 还活着吗
 | `train_loss` | CE + Dice 总损失 | 稳定下降 |
 | `val_loss` | 验证损失 | 跟随下降，不持续反弹 |
 | `dice_c2` | 大块肿瘤 Dice | 主看，应上升 |
-| `dice_fg` | 前景合并（1+2）Dice = 二值 Dice | **模型选择指标**，`best.pt` 按它刷新 |
+| `dice_fg` | 类 1、类 2 Dice 的算术平均（**不是**二值 Dice，见 4.2） | **模型选择指标**，`best.pt` 按它刷新 |
 | `dice_c1` | 零星肿瘤 Dice | 可能接近 0，别慌 |
 | `acc` | 像素精度 | 参考值，背景多时天然偏高 |
 | 括号分钟 | 单轮耗时 | 突然翻倍 = I/O 或降频 |
+
+这一行**不含** `dice_binary`（控制台行保持短）。要看二值口径去 TensorBoard 的 `foldN/val/dice_binary`，或读 `checkpoints3\foldN\history.json`——每轮的完整指标都在里面。
 
 ### 5.3 产物
 
@@ -401,14 +469,16 @@ Get-ChildItem checkpoints3\fold1\*.pt | Select Name, Length, LastWriteTime
 1. `checkpoints3\summary.json` 有内容，5 折齐全；
 2. 打开 TensorBoard，5 条 `val/dice_fg` 都在各自 `dice_fg_allbg_baseline` 之上且后段趋平；
 3. `checkpoints3\fold*\best.pt` 都在，大小一致（约 456 MB）；
-4. 把 `summary.json` 里的均值 ± 标准差抄进实验记录——**这是写论文要报的数**；
+4. 把 `summary.json` 里的均值 ± 标准差抄进实验记录——**这是写论文要报的数**。里面有两套口径别混：`last_dice_fg` 是宏平均，`last_dice_binary` 是二值 Dice。论文写「二值 Dice」就用后者；
 5. 磁盘别塞满：`Get-PSDrive D` 看剩余，5 折加日志约 6 GB。
 
 ---
 
 ## 8. 导出二值肿瘤掩膜
 
-模型是三分类，二值化只是导出时多做一步。三分类 softmax 互斥，所以 `p_肿瘤 = 1 - p_bg = p1 + p2`，`argmax > 0` 与 `p_肿瘤 > 0.5` 等价，**`dice_fg` 本身就是二值 Dice**，不需要重训。
+模型是三分类，二值化只是导出时多做一步。三分类 softmax 互斥，所以 `p_肿瘤 = 1 - p_bg = p1 + p2`，`argmax > 0` 与 `p_肿瘤 > 0.5` 等价，**不需要为出二值掩膜再训一个二分类模型**。
+
+但这条等价链只说明「推理时能直接得到二值概率」，**不表示 `dice_fg` 就是二值 Dice**。`dice_fg` 是两类 Dice 的宏平均，二值口径是 `dice_binary`（见 4.2）。论文里报二值 Dice 用后者，别拿 `dice_fg` 顶替——两者能差 0.1 以上。
 
 ```powershell
 python predict_test.py --test-root D:\data\toxpath_test `
@@ -473,6 +543,8 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 | `CUDA out of memory` | 1024 输入显存不够 | 先确认 `--grad-checkpointing` 开着（启动器默认已带，别用 `-NoGradCkpt`）；再加 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 缓解碎片；还不够 `--freeze-encoder`；别只降 `--batch-size`（本来就是 1） |
 | DataLoader 卡住不动 | Windows spawn + 大 `num-workers` | `--num-workers 2` 或 `0` |
 | `dice_c1` 是 `nan` 或 0 | 该折验证集几乎没有类 1 | 正常，看 `dice_c2` / `dice_fg` |
+| `dice_binary` 是 `nan` | 该折验证集一个前景像素都没有 | 正常，说明这折没法学到前景 |
+| 改了参数但训练没变化 | 参数直接写在启动器后面（它不认），或用了 `-Mode smoke` | 一律放进 `-ExtraArgs`；加 `-Foreground` 会把完整命令行打出来核对 |
 | 找不到数据 / 权重 | `paths.py` 候选都没命中 | 报错会列出全部试过的路径，按提示设 `TOXPATH_DATA_ROOT` / `TOXPATH_HISTOPLUS_CKPT` |
 | 训练日志停在某轮、GPU 占用 0 | 睡眠或重启 | 第 2 节设电源策略，`-Mode resume` 续上 |
 | 同折曲线上有两条重叠 | 用了旧事件目录 | 新代码重跑会自动带时间戳后缀；清 `logs3\tb\foldN_*` 里不要的 |
@@ -503,6 +575,7 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 **收工**
 
 - [ ] `summary.json` 齐全，均值 ± 标准差已记录
+- [ ] 报「二值 Dice」用的是 `last_dice_binary`，没拿 `dice_fg` 顶替
 - [ ] `best.pt` 都在
 - [ ] `logs3\` 与 `checkpoints3\` 已备份（或确认不需要）
 - [ ] 代码改动已 `sync_github.bat` 推走
@@ -516,6 +589,7 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 - 816 张有前景的 patch 中，75% 只有 1 个连通域（域数 p50=1 / p95=3 / p99=7），最大连通域面积 p25=65k / p50=354k。
 - 连通域统计（纯 numpy 4 邻接行程编码 + 并查集）与 `scipy.ndimage.label`(4 邻接) 在 60 张随机 + 20 张真实 mask 上结果完全一致。
 - 分类规则可复现：200 个碎点共 2 万 px → 类 1；2.5 万 px 整块 → 类 2；2.1 万 px 切成 3 块 → 类 1。
+- **`dice_fg` ≠ 二值 Dice**：前者是类 1、类 2 Dice 的算术平均，后者是合并 1、2 后按 2×2 混淆矩阵算的 `dice_binary`。在一个实测混淆矩阵上两者为 **0.7197 / 0.8571**，差 0.1374；类 1 越稀少、越难分，差距越大。
 - CPU（8 逻辑核 / 15.8 GB，4 线程）参考：224 输入 3.6 s/样本、512 输入 16.4 s / 3.5 GB、1024 输入 107 s / 10.4 GB。**CPU 只配跑 224 冒烟**，正式训练必须上 4090。
 - HistoPLUS 权重 `histoplus_cellvit_segmentor_20x.pt`：284,507,558 字节，SHA256 `AA19DC31C109C0A4FCF7BD773559C45480CEE792A331AE0A9FFE42EB08267BFC`。
 - 模型规模：encoder 85.7 M + neck 14.3 M + decoder 14.0 M = **114.1 M** 参数。

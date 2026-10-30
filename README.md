@@ -210,6 +210,10 @@ pip install timm==1.0.8 numpy Pillow tensorboard
 
 # 续训
 .\scripts\run_train.ps1 -Mode resume -Fold 1 -Epochs 20
+
+# 启动器没暴露的参数用 -ExtraArgs 透传（例：换 73 张 WSI 时的采样与验证频率）
+.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12 -NumWorkers 6 `
+  -ExtraArgs @("--samples-per-epoch","3500","--val-every","3","--out-dir","checkpoints3_73")
 ```
 
 脚本会把训练**脱离当前窗口**启动（关远程桌面、断 SSH 都不影响），并打印
@@ -245,6 +249,8 @@ Stop-Process -Id <PID>                                  # 停止
 几条使用要点：
 
 - **五折各是一个独立的 run**（`fold1`…`fold5`），左侧勾多个就能把同一指标叠在一张图里对比；
+- `val/dice_fg` 和 `val/dice_binary` **不是一回事**：前者是类 1、2 Dice 的算术平均（`best.pt`
+  按它选），后者是把 1、2 合并后的二值 Dice，与导出掩膜口径一致；
 - 想把 `val/dice_fg` 和"全猜空"比：同理勾上各折，注意 `fold1/val/dice_fg_allbg_baseline` 记录的
   是验证集里真值全空的 patch 占比——曲线贴着它走说明模型还没学到东西；
 - **重跑同一折会自动换目录**（`fold1_20261029-203015`），不会和上次的曲线叠在一起；
@@ -263,7 +269,10 @@ p_肿瘤 = 1 - p_bg = p_1 + p_2        # 两种写法数值完全等价
 mask   = (p_肿瘤 >= --fg-threshold)
 ```
 
-`argmax > 0` 与 `p_肿瘤 > 0.5` 也等价，因此 `dice_fg`（把 1、2 合并）就是二值 Dice。
+`argmax > 0` 与 `p_肿瘤 > 0.5` 也等价，所以推理时能直接拿到二值概率，不必再训一个
+二分类头。但**这不等于 `dice_fg` 就是二值 Dice**：`dice_fg` 是类 1、类 2 Dice 的算术
+平均，真正的二值口径是 `dice_binary`（把 1、2 合并后按 2×2 混淆矩阵算）。类 1 只有
+149 张、且验证集中常常只有几张时，两者能差 0.1 以上，论文报数别混用。
 
 ```powershell
 python predict_test.py --test-root D:\data\toxpath_test `

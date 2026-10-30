@@ -22,6 +22,7 @@
 #   .\scripts\run_train.ps1 -Mode fold -Fold 1 -DataRoot "D:\data\toxpath"
 #   .\scripts\run_train.ps1 -Mode fold -Foreground      # keep it attached (Ctrl+C works)
 #   .\scripts\run_train.ps1 -Mode all -Epochs 12 -NoGradCkpt   # 48 GB cards only
+#   .\scripts\run_train.ps1 -Mode fold -ExtraArgs "--samples-per-epoch","3500","--val-every","3"
 #
 # Curves go to TensorBoard (logs3\tb\fold{N}); the plain-text log under logs3\
 # is still the authoritative record of what happened.
@@ -52,6 +53,12 @@ param(
     # to turn it off on 48 GB cards where the recompute just costs time.
     [switch]$NoGradCkpt,
 
+    # Anything else you want to pass straight through to train_3class.py, e.g.
+    #   -ExtraArgs "--samples-per-epoch","3500","--val-every","3"
+    # Appended last, so a flag repeated here wins over the wrapper's default.
+    # Not applied to -Mode smoke (it needs its own fixed, tiny arg list).
+    [string[]]$ExtraArgs = @(),
+
     [switch]$Foreground
 )
 
@@ -76,6 +83,15 @@ if ($DataRoot -ne "") {
 # 4090 limit. smoke runs on CPU and builds its own arg list, so it is unaffected.
 if (-not $NoGradCkpt) {
     $common += "--grad-checkpointing"
+}
+
+# Accept both spellings of a pass-through list:
+#   -ExtraArgs "--samples-per-epoch","3500"        -> already an array
+#   -ExtraArgs "--samples-per-epoch,3500"          -> one string with commas
+# The second form is what survives a nested `powershell -File` call, and
+# silently reaching argparse as a single token is very hard to spot.
+if ($ExtraArgs.Count -eq 1 -and $ExtraArgs[0] -like '*,*') {
+    $ExtraArgs = @($ExtraArgs[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 }
 
 $trainArgs = @()
@@ -131,6 +147,33 @@ switch ($Mode) {
         # Serves TensorBoard; handled below once the environment is cleaned up.
         $trainArgs = @()
     }
+}
+
+# Pass-through handling: drop wrapper defaults that -ExtraArgs overrides, THEN
+# append ExtraArgs. Order matters - filtering after appending would delete the
+# user's own arguments too, since they look identical in the combined list.
+# -Mode smoke keeps its own fixed list and ignores -ExtraArgs on purpose.
+if ($Mode -ne "smoke") {
+    if ($ExtraArgs.Count -gt 0 -and $trainArgs.Count -gt 0) {
+        $extraOpts = @($ExtraArgs | Where-Object { $_ -like '--*' })
+        if ($extraOpts.Count -gt 0) {
+            $kept = @()
+            $i = 0
+            while ($i -lt $trainArgs.Count) {
+                $tok = $trainArgs[$i]
+                if ($tok -like '--*' -and ($extraOpts -contains $tok)) {
+                    $hasValue = ($i + 1 -lt $trainArgs.Count) -and ($trainArgs[$i + 1] -notlike '--*')
+                    if ($hasValue) { $i += 2 } else { $i += 1 }
+                }
+                else {
+                    $kept += $tok
+                    $i += 1
+                }
+            }
+            $trainArgs = $kept
+        }
+    }
+    $trainArgs = $trainArgs + $ExtraArgs
 }
 
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
