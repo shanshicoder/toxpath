@@ -77,6 +77,7 @@ from dataset import (  # noqa: E402
     build_weighted_sampler,
     seed_worker,
 )
+from labels import CLASS_COLORS  # noqa: E402
 from model import ToxPathConfig, ToxPathSegmentor  # noqa: E402
 from model.losses import DiceCrossEntropyLoss  # noqa: E402
 from paths import (  # noqa: E402
@@ -349,9 +350,9 @@ def log_epoch(
             add_finite(writer, tb_tag(fold, tag), val_stats[key], epoch)
 
 
-# 与 ``dataset.CLASS_COLORS`` 保持一致：0 黑 / 1 绿 / 2 红
+# 颜色只在 labels.py 定义一次，这里不再抄一份副本
 _CLASS_RGB: Tensor = torch.tensor(
-    [[0, 0, 0], [0, 255, 0], [255, 0, 0]], dtype=torch.uint8
+    [CLASS_COLORS[i] for i in sorted(CLASS_COLORS)], dtype=torch.uint8
 )
 
 
