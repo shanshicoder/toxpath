@@ -35,7 +35,7 @@ nohup.out
 # ---- 本地权重目录（271 MB，走 GitHub Release 分发，不进仓库）----
 weights/
 
-# ---- 云服务器上传包（scripts/make_upload_package.ps1 产出，1.2 GB+）----
+# ---- 打包产物（tar 体积大，不进仓库）----
 dist/
 *.tar
 *.tar.gz

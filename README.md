@@ -17,8 +17,7 @@
 > 项目主体是**模型定义 + 训练**；推理（`inference.py`）与二值导出（`predict_test.py`）
 > 保留在仓库里，评测、打包、旧的同步脚本已从工作区移除（仍完整保存在 git 历史里），
 > 需要时见文末「恢复旧文件」。
-> 操作手册按机器分开：实验室 Windows 看 `docs/本地训练SOP.md`，
-> 云服务器（AutoDL / 恒源云）看 `docs/云服务器训练SOP.md`。
+> 操作手册见 `docs/本地训练SOP.md`（实验室 Windows + 4090）。
 
 ## 目录结构
 
@@ -41,21 +40,18 @@ toxpath/
 ├── labels.py                 # 三分类定义：颜色、名称、连通域定类规则（唯一来源）
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
-│   ├── make_3class_masks.py    # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
-│   ├── make_upload_package.ps1 # 打云上传包：代码包 + 数据包 + SHA256SUMS（内含四项校验）
-│   ├── run_train.ps1           # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
-│   └── sync_github.ps1/.bat    # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
+│   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
+│   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
+│   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
 ├── docs/
-│   ├── 本地训练SOP.md        # 实验室 Windows + 4090：准备、训练、TensorBoard、排错
-│   └── 云服务器训练SOP.md    # AutoDL/恒源云：上传数据、后台训练、自动关机、结果回收
+│   └── 本地训练SOP.md        # 实验室 Windows + 4090：准备、训练、TensorBoard、排错
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
 ```
 
 `scripts/make_3class_masks.py` 是数据准备脚本：`dataset` 与 `splits` 的报错信息
 都指向它，删掉后换数据就没法重新生成三分类标签。`run_train.ps1` 是实验室
-机器的启动入口（见下节）；`make_upload_package.ps1` 是上云前的打包入口
-（代码包 + 数据包 + `SHA256SUMS`，见 `docs/云服务器训练SOP.md` 第 3 节）。
+机器的启动入口（见下节）。
 
 ## 环境
 
@@ -297,6 +293,6 @@ git checkout 2ed284a -- predict_test.py
 git checkout 2ed284a -- scripts docs tests
 ```
 
-`2ed284a` 里还有一份历史版本的 `docs/本地训练SOP.md`（含已废弃的云端方案与提交脚本说明），
+`2ed284a` 里还有一份历史版本的 `docs/本地训练SOP.md`（含已废弃的提交脚本说明），
 需要考古时再取；**当前有效的 SOP 是本仓库的 `docs/本地训练SOP.md`**，已按
 `run_train.ps1` + TensorBoard + 连通域标签的现状重写。
