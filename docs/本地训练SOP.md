@@ -233,10 +233,10 @@ conda activate toxpath
 |---|---|---|
 | 每轮 | 8–15 min（800 训练 + 约 1000 验证） | 同左 |
 | 合计 | 约 2 小时 | 8–12 小时 |
-| 显存峰值 | 10–14 GB；加 `--grad-checkpointing` 降到 6–8 GB | 同左 |
+| 显存峰值 | 1024 + batch 1：不开 `--grad-checkpointing` 会顶到 22 GB 左右，4090 正处在临界；开了约省一半激活。量级估计，以 `nvidia-smi` 为准 | 同左 |
 | 单折磁盘 | best + last ≈ 0.9 GB | 约 4.6 GB |
 
-**显存不够、或卡上还有别人的任务**时（`run_train.ps1` 没透传这些参数，直接跑 python）：
+**显存不够、或卡上还有别人的任务**时（启动器已默认带 `--grad-checkpointing`，48 GB 卡想提速才加 `-NoGradCkpt`；要再挤就得直接跑 python 传这些参数）：
 
 ```powershell
 python train_3class.py --fold 1 --epochs 12 --grad-checkpointing `
@@ -470,7 +470,7 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 | `tensorboard.exe` 找不到 | 不在 PATH | 用 `-Mode tb`，它调 `python -m tensorboard.main` |
 | `tensorboard is not installed` | 当前解释器没装 | `python -m pip install "tensorboard>=2.15"`（确认 `python` 就是 `-PythonExe` 那个） |
 | `CUDA driver version is insufficient` | 驱动太老 | 更新 NVIDIA 驱动 |
-| `CUDA out of memory` | 1024 输入显存不够 | 加 `--grad-checkpointing`，再不够 `--freeze-encoder`；别只降 `--batch-size`（本来就是 1） |
+| `CUDA out of memory` | 1024 输入显存不够 | 先确认 `--grad-checkpointing` 开着（启动器默认已带，别用 `-NoGradCkpt`）；再加 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 缓解碎片；还不够 `--freeze-encoder`；别只降 `--batch-size`（本来就是 1） |
 | DataLoader 卡住不动 | Windows spawn + 大 `num-workers` | `--num-workers 2` 或 `0` |
 | `dice_c1` 是 `nan` 或 0 | 该折验证集几乎没有类 1 | 正常，看 `dice_c2` / `dice_fg` |
 | 找不到数据 / 权重 | `paths.py` 候选都没命中 | 报错会列出全部试过的路径，按提示设 `TOXPATH_DATA_ROOT` / `TOXPATH_HISTOPLUS_CKPT` |

@@ -280,10 +280,16 @@ STAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$ROOT/logs3"
 LOG=$ROOT/logs3/train_${MODE}_${STAMP}.log
 
+# 24G 卡（4090）默认开梯度检查点，否则 1024 输入 + batch 1 会顶到 22 GB 左右。
+# 48G 卡（A40/A6000）想提速：EXTRA="" bash run.sh all 12 yes
+EXTRA=${EXTRA:---grad-checkpointing}
+# 缓解碎片，OOM 报错里 pytorch 自己也会建议这个
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
 case "$MODE" in
-  fold)   ARGS="--fold $FOLD --epochs $EPOCHS --num-workers 8 --val-every 1" ;;
-  all)    ARGS="--all-folds --epochs $EPOCHS --num-workers 8 --val-every 1" ;;
-  resume) ARGS="--fold $FOLD --epochs $EPOCHS --num-workers 8 --resume checkpoints3/fold$FOLD/last.pt" ;;
+  fold)   ARGS="--fold $FOLD --epochs $EPOCHS --num-workers 8 --val-every 1 $EXTRA" ;;
+  all)    ARGS="--all-folds --epochs $EPOCHS --num-workers 8 --val-every 1 $EXTRA" ;;
+  resume) ARGS="--fold $FOLD --epochs $EPOCHS --num-workers 8 --resume checkpoints3/fold$FOLD/last.pt $EXTRA" ;;
   *) echo "mode 必须是 fold / all / resume"; exit 2 ;;
 esac
 
@@ -330,7 +336,7 @@ bash run.sh resume 1 24 no
 |---|---|---|---|
 | `--batch-size` | 1 | 2（显存够可试 3） | 1024 输入下这是硬约束 |
 | `--grad-accum` | 8 | 4 | 等效 batch 保持 8 |
-| `--grad-checkpointing` | 建议开 | 不用开 | 24G 上省显存；48G 上白损失速度 |
+| `--grad-checkpointing` | **必须开**（`run.sh` 已默认带） | 不用开 | 24G 上省 40–50% 激活显存；48G 上白损失速度 |
 | `--num-workers` | 6–8 | 8–12 | 卡 CPU 核数，别超过核数 |
 | `--val-every` | 1 | 1 | 73 张数据时改成 3（见下） |
 | `--samples-per-epoch` | 800（4953 张） | 同左 | 73 张时 **3500** |
@@ -356,6 +362,55 @@ echo "pid=$!"
 ```
 
 并且**给新数据单独开输出目录**（`--out-dir checkpoints3_73 --log-dir logs3_73 --tb-dir logs3_73/tb`），否则会覆盖 5 切片时代的 `splits.json`，旧 checkpoint 就再也对不上划分了。
+
+### 6.6 CUDA out of memory 排查（按顺序试，别跳步）
+
+**第一步：确认实际参数**。日志开头会打印，别靠记忆：
+
+```bash
+head -14 logs3/train_fold_*.log | grep -E "image_size|batch|device"
+```
+
+若是 `batch` 大于 1，先降回 1 再谈其它。若已经是 `image_size=1024 batch=1` 还爆，走下面阶梯。
+
+**第二步：开梯度检查点**（最有效，省 40–50% 的激活显存）：
+
+```bash
+python train_3class.py --data-root data/toxpath \
+  --histoplus-ckpt /root/autodl-tmp/histoplus_cellvit_segmentor_20x.pt \
+  --fold 1 --epochs 12 --batch-size 1 --grad-checkpointing
+```
+
+`run.sh` 已默认带这个参数；只有显式 `EXTRA="" bash run.sh ...` 才会关掉。
+
+**第三步：缓解碎片**（OOM 报错里 pytorch 自己也会建议）：
+
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+`run.sh` 已默认导出。它只解决"明明有空间却要不到 12 MiB"这类碎片问题，救不了真实峰值超限。
+
+**第四步：2 分钟显存探针**，别用完整 epoch 试错：
+
+```bash
+python train_3class.py --data-root data/toxpath \
+  --histoplus-ckpt /root/autodl-tmp/histoplus_cellvit_segmentor_20x.pt \
+  --fold 1 --epochs 1 --max-train-samples 12 --max-val-samples 4 \
+  --grad-checkpointing
+```
+
+这一条能跑完，正式训练就不会 OOM —— 峰值出现在前几个 step，不在后期。
+
+**第五步：降分辨率**（有代价，先想清楚）：
+
+```bash
+--image-size 768     # 激活约降到 56%；但训练/验证/推理必须一致，指标不能与历史结果横比
+```
+
+**第六步：`--freeze-encoder`**：只训 neck + 解码头，显存最省，但那已不是完整微调，报结果时要单独标注。
+
+> 别只想着降 `--batch-size` —— 默认就是 1，没得降；`--val-batch-size` 默认也是 1。真正有效的杠杆是梯度检查点。
 
 ---
 

@@ -21,6 +21,7 @@
 #   .\scripts\run_train.ps1 -Mode tb                    # then open http://<lab-ip>:6006
 #   .\scripts\run_train.ps1 -Mode fold -Fold 1 -DataRoot "D:\data\toxpath"
 #   .\scripts\run_train.ps1 -Mode fold -Foreground      # keep it attached (Ctrl+C works)
+#   .\scripts\run_train.ps1 -Mode all -Epochs 12 -NoGradCkpt   # 48 GB cards only
 #
 # Curves go to TensorBoard (logs3\tb\fold{N}); the plain-text log under logs3\
 # is still the authoritative record of what happened.
@@ -47,6 +48,10 @@ param(
 
     [int]$NumWorkers = 4,
 
+    # 24 GB cards (4090) need gradient checkpointing at 1024/batch 1; pass this
+    # to turn it off on 48 GB cards where the recompute just costs time.
+    [switch]$NoGradCkpt,
+
     [switch]$Foreground
 )
 
@@ -66,6 +71,11 @@ $common = @()
 if ($DataRoot -ne "") {
     # Quote it: the data path may contain spaces (e.g. "D:\my data\toxpath")
     $common += @("--data-root", ('"{0}"' -f $DataRoot))
+}
+# 1024 input + batch 1 peaks around 22 GB without this, which is right at the
+# 4090 limit. smoke runs on CPU and builds its own arg list, so it is unaffected.
+if (-not $NoGradCkpt) {
+    $common += "--grad-checkpointing"
 }
 
 $trainArgs = @()
@@ -160,6 +170,12 @@ if ($dropped.Count) {
 # contain GBK-mangled Chinese text (the console codepage differs from the
 # file encoding). TensorBoard event files are binary and unaffected.
 [System.Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
+
+# Reduce allocator fragmentation so a transient 10-20 MB request does not fail
+# at the very end of an epoch. Only helps fragmentation, not a real peak overrun.
+if (-not [System.Environment]::GetEnvironmentVariable('PYTORCH_CUDA_ALLOC_CONF', 'Process')) {
+    [System.Environment]::SetEnvironmentVariable('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True', 'Process')
+}
 
 # -Mode tb: serve TensorBoard, detached so closing RDP does not kill it.
 if ($Mode -eq "tb") {
