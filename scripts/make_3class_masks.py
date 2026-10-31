@@ -38,14 +38,31 @@
 ``fg_ratio`` 保留是为了兼容 ``splits.py`` 的肿瘤负荷排序与训练端的空真值统计；
 新增三列便于事后按面积/域数重新划分类别，不必重算连通域。
 
+输入契约
+--------
+只做一件事：读 ``<data_root>/train_masks/<切片>/1.0/*.png`` 的二值 mask。
+所以跑之前必须满足（换数据时最容易漏的几条）::
+
+    <data_root>/train_masks/<切片>/1.0/<X>_<Y>.png    ← 必须是这个层级
+
+- 切片目录名**不限**（``train_001``、``TCGA-02-0001`` 都行），只要底下真有
+  ``1.0/*.png``；与 ``splits.discover_slides`` 的判定一致；
+- 倍率目录名固定 ``1.0``（``MAG_DIR`` 常量，数据集与训练端用的是同一个值）；
+- 只认 ``*.png``。patch 那边只认 ``*.jpeg``，两边扩展名不对会在训练时报
+  「没有可用 patch」；
+- 本脚本**不生成二值 mask**。geojson → 二值 mask 属于上游切图流程，不在本仓库。
+
 用法
 ----
 .. code-block:: bash
 
     python scripts/make_3class_masks.py --dry-run      # 只统计不写文件
     python scripts/make_3class_masks.py                # 正式生成
+    python scripts/make_3class_masks.py --data-root "D:/data/toxpath_73" --dry-run
     python scripts/make_3class_masks.py --big-area 80000 --mid-area 30000
     python scripts/make_3class_masks.py --mass-max-cc 1    # 更严格：只认单块
+
+生成后用 ``python scripts/check_dataset.py`` 验收（数量、命名、尺寸、分折预演）。
 """
 
 from __future__ import annotations
@@ -67,6 +84,9 @@ from paths import describe_paths, resolve_data_root  # noqa: E402
 
 DEFAULT_OUT_ROOT: Path = Path("train_masks_classes")
 DEFAULT_INDEX_NAME: str = "_patch_labels_3class.csv"
+
+MAG_DIR: str = "1.0"
+"""每个切片下的倍率子目录名。官方数据固定为 ``1.0``；数据集与训练端也用同一个值。"""
 
 
 # --------------------------------------------------------------------------- #
@@ -122,14 +142,60 @@ def render_mask(fg: np.ndarray, label: int) -> np.ndarray:
 
 
 def find_slides(masks_root: Path) -> list[str]:
-    """枚举 ``train_masks`` 下的切片目录。"""
+    """枚举 ``train_masks`` 下的切片目录。
+
+    判定标准与 ``splits.discover_slides`` 对齐：**只要该子目录下真有
+    ``1.0/*.png`` 就算一个切片**，不再要求目录名以 ``train_`` 开头。
+
+    原来是 ``p.name.startswith("train_")``，换 73 张 WSI 时会出事：那些切片
+    通常叫 ``TCGA-xx`` / ``wsi_001``，这里一个都认不出来，直接报「没有
+    train_* 子目录」，而 ``splits.py`` 那边却能正常发现——两边契约不一致。
+
+    但也不能悄悄跳过：一个切片目录里有东西却不在 ``1.0/`` 下，多半是倍率目录
+    名不对（例如 ``20x`` / ``0.5``），必须明确报出来，否则该切片的 patch 会
+    在后续统计里凭空消失。
+
+    Args:
+        masks_root: ``<data_root>/train_masks``。
+
+    Returns:
+        切片名列表，按名称排序。
+
+    Raises:
+        FileNotFoundError: 目录不存在、没有任何切片目录，或某些目录下没有
+            ``1.0/*.png``（消息里会列出是哪几个）。
+    """
     if not masks_root.exists():
         raise FileNotFoundError(f"train_masks 不存在: {masks_root}")
-    slides: list[str] = sorted(
-        p.name for p in masks_root.iterdir() if p.is_dir() and p.name.startswith("train_")
-    )
+
+    slides: list[str] = []
+    no_png: list[str] = []
+    for p in sorted(masks_root.iterdir(), key=lambda x: x.name):
+        if not p.is_dir() or p.name.startswith("."):
+            continue
+        if any((p / MAG_DIR).glob("*.png")):
+            slides.append(p.name)
+        elif not any(p.rglob("*")):
+            continue  # 完全空的目录（残留 / 占位），忽略
+        else:
+            no_png.append(p.name)
+
+    if no_png:
+        detail: str = "\n".join(
+            f"  - {masks_root / name}（子目录：{sorted(q.name for q in (masks_root / name).iterdir())[:5]}）"
+            for name in no_png[:10]
+        )
+        raise FileNotFoundError(
+            f"以下切片目录下没有 {MAG_DIR}/*.png：\n{detail}\n"
+            f"  数据集与训练端都把倍率目录写死为 {MAG_DIR!r}，"
+            f"请把二值 mask 放到 <切片>/ {MAG_DIR} / 下（或改 MAG_DIR 常量）。"
+        )
+
     if not slides:
-        raise FileNotFoundError(f"{masks_root} 下没有 train_* 子目录")
+        raise FileNotFoundError(
+            f"{masks_root} 下没有任何「含 {MAG_DIR}/*.png 的切片目录」\n"
+            f"  期望结构：{masks_root}\\<切片名>\\{MAG_DIR}\\<X>_<Y>.png"
+        )
     return slides
 
 
@@ -169,9 +235,9 @@ def run(
     t0: float = time.time()
 
     for slide in slides:
-        files: list[Path] = sorted((masks_root / slide / "1.0").glob("*.png"))
+        files: list[Path] = sorted((masks_root / slide / MAG_DIR).glob("*.png"))
         if not files:
-            raise FileNotFoundError(f"切片 {slide} 下没有 PNG: {masks_root / slide / '1.0'}")
+            raise FileNotFoundError(f"切片 {slide} 下没有 PNG: {masks_root / slide / MAG_DIR}")
 
         counts: dict[int, int] = {0: 0, 1: 0, 2: 0}
         for i, f in enumerate(files):
@@ -182,7 +248,7 @@ def run(
             if not dry_run:
                 arr: np.ndarray = np.asarray(Image.open(f).convert("L"), dtype=np.uint8)
                 out: np.ndarray = render_mask(arr > cfg.binary_thresh, rec.label)
-                out_path: Path = out_dir / slide / "1.0" / f.name
+                out_path: Path = out_dir / slide / MAG_DIR / f.name
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(out, mode="RGB").save(out_path)
 
@@ -309,8 +375,13 @@ def main(argv: list[str] | None = None) -> int:
         cc_min_area=args.cc_min_area,
         binary_thresh=args.binary_thresh,
     )
-    return run(args.data_root, args.out_root, cfg,
-               dry_run=args.dry_run, verbose=args.verbose)
+    try:
+        return run(args.data_root, args.out_root, cfg,
+                   dry_run=args.dry_run, verbose=args.verbose)
+    except FileNotFoundError as exc:
+        # 目录结构不对（缺 1.0/、切片名不匹配等）是配置问题，不该甩 traceback
+        print(f"[error] {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

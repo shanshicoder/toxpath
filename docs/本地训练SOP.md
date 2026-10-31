@@ -14,7 +14,7 @@
 | 体检：这台机器能不能开训 | `nvidia-smi` + 第 1 节逐项核对 |
 | 拉最新代码 | `git pull` |
 | **数据在项目外 / 换了盘** | `python paths.py` 确认解析结果；临时指定用 `-DataRoot "D:\data\toxpath"`（见 1.5） |
-| 数据换过 / 第一次跑 | `python scripts\make_3class_masks.py --dry-run` 看分布 → 去掉 `--dry-run` 生成 |
+| 数据换过 / 第一次跑 | `make_3class_masks.py --dry-run` 看分布 → 去掉 `--dry-run` 生成 → `check_dataset.py` 验收 + 分折预演（见 1.6） |
 | 冒烟（约 1 分钟，**没显卡也能跑**） | `.\scripts\run_train.ps1 -Mode smoke`；验权重加载加 `-WithWeights`（见 1.7） |
 | 单折训练 | `.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12` |
 | 临时改某个训练参数 | `.\scripts\run_train.ps1 -Mode fold -ExtraArgs "--samples-per-epoch","3500"`（见 3.4） |
@@ -147,29 +147,114 @@ python paths.py
 2. **路径含空格没问题**：`-DataRoot "E:\my data\toxpath"` 实测引号被正确剥离，Python 收到的是干净路径。
 3. **别把 `--data-root` 指到 `train_patches` 那一层**，会报 `其下是否有 train_patches：False`——这句报错就是在提示高了一层。
 
-### 1.6 生成三分类标签（换数据后必做）
+### 1.6 数据流水线：二值 mask → 三分类 → 验收 → 分折（换数据后必做）
 
-二值 mask 不会自动变成三分类，必须先跑一次标签脚本。规则（4 邻接连通域，定义在 `labels.py`，训练/导出/可视化共用同一份）：
+四步一条链，**每一步都可能单独出错，也都得单独验收**：
 
-| 条件 | 类别 |
+```
+上游切图    → train_patches\<切片>\1.0\*.jpeg      不在本仓库，按下面契约产出
+上游栅格化  → train_masks\<切片>\1.0\*.png         二值，>127 记前景
+     ↓ python scripts\make_3class_masks.py
+train_masks_classes\<切片>\1.0\*.png + _patch_labels_3class.csv
+     ↓ python scripts\check_dataset.py            数量/命名/尺寸/颜色/CSV + 分折预演
+     ↓ .\scripts\run_train.ps1 -Mode smoke        端到端真跑一遍（见 1.7）
+```
+
+**先看契约，再动手。** 下面四项是硬编码的，不符合时要么直接报错、要么更糟——静默丢数据：
+
+| 项 | 必须是 | 不符合的后果 |
+|---|---|---|
+| 倍率目录 | `<切片>\1.0\` | `make_3class_masks.py` 报错，消息里会列出是哪几个切片、下面实际是什么目录 |
+| patch 扩展名 | `.jpeg` | 数据集只 glob `*.jpeg`，`.jpg`/`.png` 被当成 0 张 → 「没有可用 patch」 |
+| mask 文件数 | 每个 patch 都有同名 `.png` | 训练启动时 `ValueError` 列出缺的几张，7 万张里翻这几个名字很费劲 |
+| 切片目录名 | **任意**（`train_001`、`TCGA-02-0001`、`wsi_007` 都行） | — |
+
+> 最后一条以前不成立：`make_3class_masks.py` 只认 `train_` 前缀，73 张 WSI 会被整批跳过并报「没有 train_* 子目录」。已改成与 `splits.py` 同一套判定（目录下有 `1.0\*.png` 就算切片）。
+
+#### ① dry-run 定阈值（不写任何文件，约 45 秒 / 5 切片）
+
+```powershell
+python scripts\make_3class_masks.py --dry-run
+python scripts\make_3class_masks.py --data-root "D:\data\toxpath_73" --dry-run   # 数据在别处
+```
+
+看三件事，**不要只看总数**：
+
+1. 总数是否等于 `train_patches` 的 patch 数（不等说明有切片没被识别）；
+2. 类别 1 有没有塌到接近 0——塌了就调阈值（见 ③ 后面的表）；
+3. 域数 / 最大域面积 / 主体占比的分位数：73 张若换了扫描分辨率，`p50` 最大域面积会整体平移，阈值要跟着缩放。
+
+本地 4953 张的基准（拿它当参照系）：类别 **4140 / 149 / 664**（83.6% / 3.0% / 13.4%），有前景的 816 张里域数 `p50=1`、最大域面积 `p50=354k`。
+
+> 还没生成三分类 mask 时也可以先跑 `check_dataset.py`：它会把 patch / 二值 mask 这一层的问题先报出来（扩展名不对、缺 mask、尺寸不一致），省得生成完一小时才发现上游切图有问题。
+
+#### ② 正式生成
+
+```powershell
+python scripts\make_3class_masks.py
+python scripts\make_3class_masks.py --data-root "D:\data\toxpath_73"
+```
+
+约 5 分钟 / 4953 张（写 24 MB PNG + 一份 CSV）。数据在项目外时**输出写回那个数据根**（`<data-root>\train_masks_classes\` 与 `<data-root>\_patch_labels_3class.csv`），不会跑到项目目录里。
+
+两点行为要知道：**CSV 整体覆盖、PNG 全部重写**（所以改阈值重跑是安全的，不必先清空）；但**旧文件不会被删除**——同一数据根先跑过 A 数据、再跑 B 数据，A 的 PNG 会留在原处。
+
+#### ③ 验收 + 分折预演（4953 张约 2 秒，只读）
+
+```powershell
+python scripts\check_dataset.py
+python scripts\check_dataset.py --data-root "D:\data\toxpath_73" --table
+```
+
+它查六件事：patch/二值/三分类三方数量对不对、文件名集合是否一一对应、patch 是否全是 `.jpeg`、抽样比对 patch 与 mask 的尺寸与颜色（只允许黑/绿/红）、CSV 行数与重复键、以及**用训练端同一个 `splits.py` 把折先算出来给你看**：
+
+```
+[check] 合计：patch 4953 / 二值 mask 4953 / 三分类 mask 4953 / CSV 4953 行
+[check] 抽样核对：25/25 组尺寸与颜色合规
+
+[check] 分折预演（5 切片 → 5 折，按 mean_fg 蛇形分层）
+  折         切片    patch   肿瘤 patch      全空基线  验证切片
+  fold1      1      952         31     0.967  train_005
+  ...
+[check] 结论：通过。数量、命名、尺寸、颜色、CSV、分折都一致，可以进 1.7 冒烟。
+```
+
+退出码 `0` 通过、`1` 有问题（逐条打印「现象 + 怎么修」）、`2` 连数据根都找不到。**全空基线那一列是这一折的 `dice_fg` 地板线**，73 个切片时先看它，再决定各折结果能不能横比（理由见 3.5 最后一段）。
+
+分折预演只是预览，不落盘；真正的 `splits.json` 在训练启动时才写进 `--out-dir`。
+
+#### ④ 冒烟
+
+```powershell
+.\scripts\run_train.ps1 -Mode smoke -DataRoot "D:\data\toxpath_73"
+```
+
+通过标准见 1.7。
+
+**73 张数据的完整一条龙**（照抄即可，`$DR` 只改一处）：
+
+```powershell
+$DR = "D:\data\toxpath_73"
+python scripts\make_3class_masks.py --data-root $DR --dry-run     # 看分布定阈值
+python scripts\make_3class_masks.py --data-root $DR               # 约 70 分钟（7 万张）
+python scripts\check_dataset.py --data-root $DR --folds 5         # 验收 + 分折预演
+.\scripts\run_train.ps1 -Mode smoke -DataRoot $DR                 # 端到端冒烟
+```
+
+**阈值怎么调**（只在 ① 看到类别 1 塌掉、或最大域面积分位数整体偏移时才动）：
+
+| 现象 | 调法 |
 |---|---|
-| 前景 < 128 px（≈11×11，标注噪声） | 0 背景 |
-| 最大连通域 ≥ 50,000 px（≈4.8% patch） | 2 大块 |
-| 最大连通域 ≥ 20,000 px **且** 域数 ≤ 2 **且** 主体占比 ≥ 80% | 2 大块 |
-| 其余有前景 | 1 零星 |
+| 类别 1 接近 0，类别 2 太多 | 调大 `--big-area` / `--mid-area`（更严格），例如 `--big-area 80000 --mid-area 30000` |
+| 类别 1 太多，一堆小灶被判成零星 | 调大 `--min-fg-px`（把更小的前景并入背景）或 `--cc-min-area` |
+| 一块实体瘤被判成"散成碎片" | 放宽 `--mass-max-cc` / `--mass-min-dominance` |
 
 ```powershell
-python scripts\make_3class_masks.py --dry-run     # 只统计分布，约 45 秒（5 切片）
-python scripts\make_3class_masks.py               # 确认后写文件，约 5 分钟（5 切片）
+python scripts\make_3class_masks.py --data-root $DR --big-area 80000 --mid-area 30000
+python scripts\check_dataset.py --data-root $DR      # 改完必须重验
 ```
 
-数据在项目外时照常加 `--data-root`，**输出会写回那个数据根**（`<data-root>\train_masks_classes\` 和 `<data-root>\_patch_labels_3class.csv`），不会跑到项目目录里。已实测。
-
-**看 `--dry-run` 的分布再决定阈值**。本地 4953 张的结果是 **4140 / 149 / 664**（83.6% / 3.0% / 13.4%）。上 73 张 WSI、约 7 万 patch 时，如果分辨率或标注风格变了导致类别 1 塌到接近 0，就调阈值：
-
-```powershell
-python scripts\make_3class_masks.py --big-area 80000 --mid-area 30000   # 更严格
-```
+阈值是**按 1024×1024、1.0 mpp 标定的**。如果 73 张换了倍率或 patch 尺寸，面积阈值要按边长平方缩放（边长减半 → 面积阈值除以 4），否则「大块/零星」的分界会整体偏移。
 
 ### 1.7 冒烟（每次开训前都跑）
 
@@ -329,6 +414,8 @@ python train_3class.py --fold 1 --epochs 12 --grad-checkpointing `
 ### 3.5 换成 73 张 WSI 时要改什么
 
 数据从 5 个切片扩到 73 个（约 7 万 patch）后，**默认参数会跑不完**——不是报错，是五折要跑六天。三件事必须跟着调。
+
+> 数据侧的完整准备（二值 mask → 三分类 → 验收 → 分折预演 → 冒烟）见 **1.6**，那里有一份能直接抄的 73 张一条龙命令；本节只讲训练参数。
 
 **① 时长会从"过夜"变成"一周"。** 按 4953 张的实测口径外推（训练 ~1 s/样本、验证 ~0.35 s/张）：
 
@@ -626,6 +713,12 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 | 改了参数但训练没变化 | 参数直接写在启动器后面（它不认），或用了 `-Mode smoke` | 一律放进 `-ExtraArgs`；加 `-Foreground` 会把完整命令行打出来核对 |
 | 找不到数据 / 权重 | `paths.py` 候选都没命中 | 报错会列出全部试过的路径，按提示设 `TOXPATH_DATA_ROOT` / `TOXPATH_HISTOPLUS_CKPT` |
 | `--data-root 指向的目录不可用` / `其下是否有 train_patches：False` | 指到了 `train_patches` 那一层，或指到了父目录 | 指向**包含** `train_patches/` 的那一层；`python paths.py` 先自检 |
+| `make_3class_masks` 报「以下切片目录下没有 1.0/*.png」 | mask 的倍率目录名不是 `1.0`（例如 `20x`） | 把二值 mask 放到 `<切片>\1.0\` 下；数据集与训练端都写死这个层级，报错里会列出现有子目录 |
+| `make_3class_masks` 报「没有任何含 1.0/*.png 的切片目录」 | 目录层级整体不对（少了 `<切片>` 这一层） | 期望结构就是 `train_masks\<切片>\1.0\<X>_<Y>.png` |
+| 数据集报「没有可用 patch」但目录里明明有图 | patch 是 `.jpg` / `.png`，数据集只 glob `*.jpeg` | 重导出为 `.jpeg`；`check_dataset.py` 会直接打印扩展名分布 |
+| `check_dataset` 报「尺寸不一致」 | 切图与 mask 栅格化用了不同坐标 / 缩放 | 上游用同一套金字塔层级重出 mask，别靠 resize 凑 |
+| `check_dataset` 报「含非约定颜色」 | 三分类 mask 用了别的调色板 | 重跑 `make_3class_masks.py`（颜色只在 `labels.py` 定义一份） |
+| `check_dataset` 报「三分类 mask 多出 N 张」 | 同一数据根跑过别的数据集，旧 PNG 残留 | 清空 `train_masks_classes\` 后重跑 `make_3class_masks.py` |
 | 训练跑起来了，但结果明显不是这份数据 | 环境变量指向了另一份数据，命令行没覆盖它 | 看日志头 `data_root` 那一行是否是你以为的路径；临时用 `-DataRoot` 覆盖 |
 | 产物落在奇怪的地方（比如 `E:\tmp\checkpoints3`） | 显式传了相对的 `--out-dir`，而当时的工作目录不在项目根 | 一律写绝对路径；或改用 `run_train.ps1`（内部会切到项目根） |
 | 看板能打开，但一条曲线都没有 | 训练时用了别的 `--tb-dir`，看板还在看 `logs3\tb` | `-Mode tb -TbDir "<训练时的 tb 目录>"`，启动日志里的 `[logdir ]` 会回显实际目录 |
@@ -645,6 +738,7 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 - [ ] `git pull` 拿的是最新代码
 - [ ] `data\toxpath` 齐、`_patch_labels_3class.csv` 与三分类 mask 是同一次生成的
 - [ ] 换过数据就跑过 `make_3class_masks.py --dry-run` 并看过分布
+- [ ] `check_dataset.py` 退出码为 0（数量/命名/尺寸/颜色/CSV/分折全过）
 - [ ] `-Mode smoke` 通过
 - [ ] 电源策略已设（`powercfg` 三条）
 - [ ] Windows 更新已暂停
@@ -676,3 +770,5 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 - CPU（8 逻辑核 / 15.8 GB，4 线程）参考：224 输入 3.6 s/样本、512 输入 16.4 s / 3.5 GB、1024 输入 107 s / 10.4 GB。**CPU 只配跑 224 冒烟**，正式训练必须上 4090。
 - HistoPLUS 权重 `histoplus_cellvit_segmentor_20x.pt`：284,507,558 字节，SHA256 `AA19DC31C109C0A4FCF7BD773559C45480CEE792A331AE0A9FFE42EB08267BFC`。
 - 模型规模：encoder 85.7 M + neck 14.3 M + decoder 14.0 M = **114.1 M** 参数。
+- `make_3class_masks.py --dry-run` 在 4953 张上实测 **43.3 s**；切片识别不要求 `train_` 前缀（与 `splits.py` 同一套判定），`TCGA-02-0001` / `wsi_007` 两种命名的测试集均能识别；倍率目录固定 `1.0`，不符时报错并列出该切片下实际的子目录名。
+- `check_dataset.py` 在 4953 张上耗时 **1.5 s**，抽样 25 组 patch/mask 尺寸与颜色全部合规，分折预演结果与 5.4 的表逐项一致；向测试集注入「尺寸不一致 / 混入 `.jpg` / 缺 mask / 三分类错颜色」四类错误后全部报出、退出码 1。

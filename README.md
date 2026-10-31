@@ -41,6 +41,7 @@ toxpath/
 ├── paths.py                  # 数据根 / 权重路径解析，不写死盘符
 ├── scripts/
 │   ├── make_3class_masks.py  # 二值 mask → 三分类彩色 mask + 标签索引（训练前置）
+│   ├── check_dataset.py      # 数据契约检查 + 分折预演（数量/命名/尺寸/颜色/CSV）
 │   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
 │   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
 ├── docs/
@@ -107,7 +108,13 @@ data/toxpath/
 python scripts/make_3class_masks.py --dry-run   # 只统计分布，不写文件（约 45 s）
 python scripts/make_3class_masks.py             # 生成 train_masks_classes/ 与 CSV（约 5 min）
 python scripts/make_3class_masks.py --big-area 80000 --mid-area 30000   # 想更严格可调
+python scripts/check_dataset.py                 # 验收 + 分折预演，退出码 0 才开训
 ```
+
+`check_dataset.py` 只读，约 1.5 s（4953 张）：核对 patch / 二值 mask / 三分类 mask
+三方数量与文件名集合、patch 扩展名是否为数据集唯一认的 `.jpeg`、抽样比对尺寸与
+颜色（只允许黑/绿/红）、CSV 行数与重复键，并用训练端同一个 `splits.py` 预演每折的
+patch 数与全空基线。
 
 CSV 列为 `slide,name,n_fg_px,fg_ratio,n_cc,max_cc_px,dominance,label`。保留
 `fg_ratio` 是给 `splits.py` 排序肿瘤负荷、训练端统计空真值用的；后三列让阈值
