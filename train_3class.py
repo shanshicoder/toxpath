@@ -36,12 +36,13 @@
     python train_3class.py --fold 1 --epochs 1 --image-size 224 --batch-size 1 \\
         --max-train-samples 4 --max-val-samples 2 --device cpu --no-amp
 
-    # 实验室 4090 正式训练（1024 输入，梯度累积 8）
-    python train_3class.py --fold 1 --epochs 12 --batch-size 1 --grad-accum 8 \\
-        --samples-per-epoch 800 --amp --grad-checkpointing
+    # 实验室 RTX PRO 5000 Blackwell 48GB 正式训练（1024 输入，batch 4 x 累积 2）
+    python train_3class.py --fold 1 --epochs 12 --image-size 1024 --batch-size 4 \\
+        --grad-accum 2 --samples-per-epoch 800 --amp --val-every 3
 
     # 全 5 折
-    python train_3class.py --all-folds --epochs 12 --batch-size 1 --grad-accum 8
+    python train_3class.py --all-folds --epochs 12 --image-size 1024 \\
+        --batch-size 4 --grad-accum 2 --samples-per-epoch 800 --amp
 """
 
 from __future__ import annotations

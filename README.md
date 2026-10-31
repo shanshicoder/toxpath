@@ -17,7 +17,7 @@
 > 项目主体是**模型定义 + 训练**；推理（`inference.py`）与二值导出（`predict_test.py`）
 > 保留在仓库里，评测、打包、旧的同步脚本已从工作区移除（仍完整保存在 git 历史里），
 > 需要时见文末「恢复旧文件」。
-> 操作手册见 `docs/本地训练SOP.md`（实验室 Windows + 4090）；
+> 操作手册见 `docs/本地训练SOP.md`（实验室 Windows + RTX PRO 5000 Blackwell）；
 > 手边没显卡时怎么先验一遍见 `docs/本机验证SOP.md`（笔记本 / CPU）。
 
 ## 目录结构
@@ -46,7 +46,7 @@ toxpath/
 │   ├── run_train.ps1         # 实验室启动器：后台训练 + TensorBoard 服务 + 断远程桌面不中断
 │   └── sync_github.ps1/.bat  # 提交 + 推送（大文件护栏，自动选 SSH/HTTPS）
 ├── docs/
-│   ├── 本地训练SOP.md        # 实验室 Windows + 4090：准备、训练、TensorBoard、排错
+│   ├── 本地训练SOP.md        # 实验室 Windows + RTX PRO 5000 Blackwell：环境、训练、TensorBoard、排错
 │   └── 本机验证SOP.md        # 笔记本 / CPU：能验什么、逐条命令、本机实测数字
 ├── requirements.txt
 └── data/toxpath/             # 数据（不进仓库）
@@ -63,7 +63,7 @@ toxpath/
 ```powershell
 conda create -n toxpath python=3.10 -y
 conda activate toxpath
-pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision   # 4090
+pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision   # Blackwell sm_120
 pip install timm==1.0.8 numpy Pillow tensorboard
 ```
 
@@ -197,14 +197,14 @@ scripts\sync_github.bat -NoCommit                           # 已手动 commit �
 
 失败时按退出码给排查清单：passphrase 输错、publickey 未授权、non-fast-forward、代理不通。
 
-## 实验室机器：跑起来 + 看曲线（4090）
+## 实验室机器：跑起来 + 看曲线（RTX PRO 5000 Blackwell 48 GB）
 
 ### 一次性准备
 
 ```powershell
 git clone git@github.com:shanshicoder/toxpath.git D:\work\toxpath   # 或 git pull
 conda create -n toxpath python=3.10 -y ; conda activate toxpath
-pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 pip install timm==1.0.8 numpy Pillow tensorboard
 ```
 

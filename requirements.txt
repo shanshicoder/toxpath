@@ -3,9 +3,11 @@
 # 安装顺序很重要：torch 必须先装，且最好用官方 index 指定 CPU/CUDA 版本，
 # 否则 pip 会从 PyPI 拉一个体积大很多、还可能与驱动不匹配的 wheel。
 #
-# 实验室 RTX 4090（正式训练）：
-#   pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
-#   （驱动 >= 550 用 cu124；若已是 580+ 也可用 cu128）
+# 实验室 RTX PRO 5000 Blackwell 48GB（正式训练）：
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
+#   必须 cu128：Blackwell 是 sm_120，cu121/cu124 的 wheel 没有 sm_120 内核，
+#   装上后 is_available() 仍为 True，但第一次真实计算就报 no kernel image。
+#   驱动需 >= R570（nvidia-smi 里 CUDA Version >= 12.8）。
 #
 # 笔记本 MX350 2GB（只做形状测试）：
 #   pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
