@@ -264,10 +264,12 @@ python scripts\check_dataset.py --data-root $DR      # 改完必须重验
 
 固定用 CPU + 224 输入 + 8 个样本，只验「数据能读、标签能对、loss 能算、checkpoint 能存」，约 1 分钟。**通过标准：** 无报错、日志末行有 `[Fold 1 Epoch 1/1]` 汇总、`_smoke\ckpt\last.pt` 已生成（`best.pt` 只在验证集存在前景时才写，没有属正常）。
 
-**这个冒烟在没显卡的笔记本上一样能跑**（固定 `--device cpu`），本机实测 47 秒。两个常用变体：
+**这个冒烟在没显卡的笔记本上一样能跑**（固定 `--device cpu`），本机实测约 58 秒（2026-10-31 复测）。两个常用变体：
+
+> 笔记本上怎么验、能验到哪一步、PATH 上的 `python` 不是 toxpath 环境这类本机专属的坑，见 **`docs\本机验证SOP.md`**（那边有逐条命令 + 本机实测数字）。
 
 ```powershell
-# 顺带验 HistoPLUS 权重加载（271 MB，最易在新机器上出问题的一环）—— 实测 44 秒
+# 顺带验 HistoPLUS 权重加载（271 MB，最易在新机器上出问题的一环）—— 实测约 59 秒
 .\scripts\run_train.ps1 -Mode smoke -WithWeights
 
 # 验一份放在别处的数据能不能喂进去（不传就用 paths.py 的默认解析，注意别验错了数据）
@@ -767,7 +769,7 @@ scripts\sync_github.bat -NoCommit                            # 已手动 commit�
 - 连通域统计（纯 numpy 4 邻接行程编码 + 并查集）与 `scipy.ndimage.label`(4 邻接) 在 60 张随机 + 20 张真实 mask 上结果完全一致。
 - 分类规则可复现：200 个碎点共 2 万 px → 类 1；2.5 万 px 整块 → 类 2；2.1 万 px 切成 3 块 → 类 1。
 - **`dice_fg` ≠ 二值 Dice**：前者是类 1、类 2 Dice 的算术平均，后者是合并 1、2 后按 2×2 混淆矩阵算的 `dice_binary`。在一个实测混淆矩阵上两者为 **0.7197 / 0.8571**，差 0.1374；类 1 越稀少、越难分，差距越大。
-- CPU（8 逻辑核 / 15.8 GB，4 线程）参考：224 输入 3.6 s/样本、512 输入 16.4 s / 3.5 GB、1024 输入 107 s / 10.4 GB。**CPU 只配跑 224 冒烟**，正式训练必须上 4090。
+- CPU（8 逻辑核 / 15.8 GB，4 线程）参考：224 输入约 0.2 it/s ≈ 5 s/步（早先复测 3.6 s/样本）、512 输入 16.4 s / 3.5 GB、1024 输入 107 s / 10.4 GB。**CPU 只配跑 224 冒烟**，正式训练必须上 4090。
 - HistoPLUS 权重 `histoplus_cellvit_segmentor_20x.pt`：284,507,558 字节，SHA256 `AA19DC31C109C0A4FCF7BD773559C45480CEE792A331AE0A9FFE42EB08267BFC`。
 - 模型规模：encoder 85.7 M + neck 14.3 M + decoder 14.0 M = **114.1 M** 参数。
 - `make_3class_masks.py --dry-run` 在 4953 张上实测 **43.3 s**；切片识别不要求 `train_` 前缀（与 `splits.py` 同一套判定），`TCGA-02-0001` / `wsi_007` 两种命名的测试集均能识别；倍率目录固定 `1.0`，不符时报错并列出该切片下实际的子目录名。
