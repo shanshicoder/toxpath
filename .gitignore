@@ -42,7 +42,7 @@ dist/
 
 # ---- 临时可视化 / 验证 ----
 mask_visual_check.png
-_smoke/
+_smoke*/
 _verify/
 
 # ---- 编辑器 / 系统 ----

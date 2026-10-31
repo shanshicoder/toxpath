@@ -15,7 +15,7 @@
 | 拉最新代码 | `git pull` |
 | **数据在项目外 / 换了盘** | `python paths.py` 确认解析结果；临时指定用 `-DataRoot "D:\data\toxpath"`（见 1.5） |
 | 数据换过 / 第一次跑 | `python scripts\make_3class_masks.py --dry-run` 看分布 → 去掉 `--dry-run` 生成 |
-| 冒烟（约 1 分钟） | `.\scripts\run_train.ps1 -Mode smoke` |
+| 冒烟（约 1 分钟，**没显卡也能跑**） | `.\scripts\run_train.ps1 -Mode smoke`；验权重加载加 `-WithWeights`（见 1.7） |
 | 单折训练 | `.\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12` |
 | 临时改某个训练参数 | `.\scripts\run_train.ps1 -Mode fold -ExtraArgs "--samples-per-epoch","3500"`（见 3.4） |
 | 五折训练（过夜） | `.\scripts\run_train.ps1 -Mode all -Epochs 12` |
@@ -178,6 +178,38 @@ python scripts\make_3class_masks.py --big-area 80000 --mid-area 30000   # 更严
 ```
 
 固定用 CPU + 224 输入 + 8 个样本，只验「数据能读、标签能对、loss 能算、checkpoint 能存」，约 1 分钟。**通过标准：** 无报错、日志末行有 `[Fold 1 Epoch 1/1]` 汇总、`_smoke\ckpt\last.pt` 已生成（`best.pt` 只在验证集存在前景时才写，没有属正常）。
+
+**这个冒烟在没显卡的笔记本上一样能跑**（固定 `--device cpu`），本机实测 47 秒。两个常用变体：
+
+```powershell
+# 顺带验 HistoPLUS 权重加载（271 MB，最易在新机器上出问题的一环）—— 实测 44 秒
+.\scripts\run_train.ps1 -Mode smoke -WithWeights
+
+# 验一份放在别处的数据能不能喂进去（不传就用 paths.py 的默认解析，注意别验错了数据）
+.\scripts\run_train.ps1 -Mode smoke -DataRoot "D:\data\toxpath_73"
+```
+
+`-WithWeights` 的通过标准是日志里出现这两行，`missing=0` 与 `shape_mismatch=0` 是关键：
+
+```
+encoder : loaded=173, missing=0, unexpected=20, shape_mismatch=0
+neck    : loaded=68 (strict)
+```
+
+**本机能验到哪一步、验不到什么**（这是笔记本上唯一值得做的事）：
+
+| ✅ 能验 | ❌ 验不了 |
+|---|---|
+| 数据读取、标签反解、切片分折 | 真实训练速度 |
+| 模型构建 + 权重加载 | 显存够不够（2 GB 卡与 24 GB 卡完全不同） |
+| 前向 / 反向 / loss 下降 / checkpoint 落盘 | CUDA、bf16、梯度累积的显存行为 |
+| TensorBoard 事件文件写入 | 加了梯度检查点后的峰值 |
+
+**别指望在本机把模型训出来。** 实测 CPU 上 0.30 it/s（≈3.3 s/步，224 输入），1024 输入是 107 s/步；单折 12 轮 × 800 样本 = 9600 步，1024 下要 **11.9 天**，而 4090 上同口径约 3.8 小时。
+
+**笔记本的独显也帮不上忙**：常见环境装的是 `torch==2.x+cpu`（`torch.__version__` 末尾带 `+cpu`），`torch.cuda.is_available()` 直接是 `False`；即便换成 CUDA 版，MX350 只有 2 GB 显存，而 1024 输入峰值约 22 GB。不值得在这上面折腾，验 CUDA 请到 4090 那台机器上跑。
+
+> 冒烟产物约 **436 MB**（`last.pt` 含 114 M 参数 + 优化器状态）。跑完随手清：`Remove-Item _smoke -Recurse -Force`。
 
 要额外验 CUDA 与显存，直接跑一次 GPU 小样本：
 

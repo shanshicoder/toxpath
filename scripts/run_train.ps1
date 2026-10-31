@@ -16,6 +16,8 @@
 #
 # Examples:
 #   .\scripts\run_train.ps1 -Mode smoke
+#   .\scripts\run_train.ps1 -Mode smoke -WithWeights    # also load HistoPLUS (271 MB)
+#   .\scripts\run_train.ps1 -Mode smoke -DataRoot "D:\data\toxpath_73"   # validate new data
 #   .\scripts\run_train.ps1 -Mode fold -Fold 1 -Epochs 12
 #   .\scripts\run_train.ps1 -Mode all -Epochs 12
 #   .\scripts\run_train.ps1 -Mode resume -Fold 1 -Epochs 20
@@ -66,6 +68,11 @@ param(
     # Not applied to -Mode smoke (it needs its own fixed, tiny arg list).
     [string[]]$ExtraArgs = @(),
 
+    # Smoke runs --init none by default (fast, no 271 MB weight load). Pass this
+    # to load HistoPLUS too, which is the step most likely to break on a new box
+    # (timm version / key mismatch). Costs ~30 s instead of ~50 s on CPU.
+    [switch]$WithWeights,
+
     [switch]$Foreground
 )
 
@@ -104,6 +111,7 @@ if ($ExtraArgs.Count -eq 1 -and $ExtraArgs[0] -like '*,*') {
 $trainArgs = @()
 switch ($Mode) {
     "smoke" {
+        $smokeInit = if ($WithWeights) { "encoder+neck" } else { "none" }
         $trainArgs = @(
             "train_3class.py",
             "--fold", "1",
@@ -115,11 +123,17 @@ switch ($Mode) {
             "--log-every", "1",
             "--num-workers", "0",
             "--device", "cpu",
-            "--init", "none",
+            "--init", $smokeInit,
             "--out-dir", "_smoke/ckpt",
             "--log-dir", "_smoke/log",
             "--tb-dir", "_smoke/tb"
         )
+        # smoke has its own fixed arg list, so -DataRoot must be appended here
+        # explicitly - otherwise validating a dataset that lives on another
+        # drive silently reads whatever paths.py happens to resolve.
+        if ($DataRoot -ne "") {
+            $trainArgs += @("--data-root", ('"{0}"' -f $DataRoot))
+        }
     }
     "fold" {
         $trainArgs = @(
